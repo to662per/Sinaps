@@ -8,6 +8,26 @@ from ..skills.base import Response, Skill, SlotSpec
 def register() -> Skill:
     skill = Skill("apps", description="Программы и файлы")
 
+    def _not_found(what: str, query: str) -> str:
+        """Ответ «не нашёл» с подсказками — как у программ.
+
+        Раньше файлы и папки отвечали голым «Не нашёл», хотя рядом был
+        «Отчёт2026.pdf», а человек сказал «отчет». Программы в том же
+        случае предлагали варианты, и разница выглядела случайной.
+        """
+        try:
+            from ..platform.windows import suggest_paths
+
+            similar = suggest_paths(query, limit=3)
+        except Exception:                             # noqa: BLE001
+            similar = []
+
+        if similar:
+            names = ", ".join(similar)
+            return (f"Не нашёл {what} «{query}». Похожее: {names}. "
+                    f"Скажи точнее.")
+        return f"Не нашёл {what} «{query}»"
+
     async def open_app(ctx, slots):  # noqa: ANN001
         query = slots["name"]
         ok, info = ctx.platform.launch_app(query)
@@ -36,16 +56,18 @@ def register() -> Skill:
     async def open_file(ctx, slots):  # noqa: ANN001
         query = slots["name"]
         ok = ctx.platform.open_path(query)
-        if not ok:
-            return Response(speech=f"Не нашёл файл {query}")
-        return Response(speech=f"Открываю {query}")
+        if ok:
+            return Response(speech=f"Открываю {query}")
+        return Response(speech=_not_found("файл", query),
+                        display=f"не найдено: {query}")
 
     async def open_folder(ctx, slots):  # noqa: ANN001
         query = slots["name"]
         ok = ctx.platform.open_path(query)
-        if not ok:
-            return Response(speech=f"Не нашёл папку {query}")
-        return Response(speech=f"Открываю папку {query}")
+        if ok:
+            return Response(speech=f"Открываю папку {query}")
+        return Response(speech=_not_found("папку", query),
+                        display=f"не найдено: {query}")
 
     async def show_folder(ctx, slots):  # noqa: ANN001
         query = slots["name"]

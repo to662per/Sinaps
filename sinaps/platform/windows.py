@@ -187,6 +187,17 @@ def _match_quality(query: str, name: str) -> int:
 #: Слова короче этого не дают полезных совпадений («7», «и»).
 _MIN_TOKEN_LEN = 3
 
+#: Порог нечёткого совпадения для запасного поиска.
+#:
+#: Подбирался на реальных промахах распознавания: «блокно» против
+#: «блокнот» даёт ~0.91, а «кальк» против «калькулятор» — ~0.6.
+#: Порог 0.72 пропускает первое и отсекает второе.
+FUZZY_MIN_SCORE = 0.72
+
+#: Насколько лучший кандидат должен быть лучше второго. Иначе ассистент
+#: угадывает, а человек уверен, что открылось нужное.
+FUZZY_MIN_GAP = 0.08
+
 
 def _name_forms(name: str) -> set[str]:
     """Формы для нечёткого сравнения: варианты названия + варианты его слов.
@@ -275,12 +286,19 @@ class WindowsPlatform:
 
         return False, f"Не нашёл программу «{name}»"
 
-    def find_app(self, query: str) -> AppInfo | None:
+    def find_app(self, query: str, *, fuzzy: bool = False) -> AppInfo | None:
         """Находит приложение по имени или одному из алиасов.
 
-        Совпадение не только точное: «autocad» должен найти «AutoCAD 2026 —
-        Русская версия». Поэтому сравниваем по границам слов, иначе
-        «word» нашёл бы «Password Manager».
+        Сначала точное совпадение по границам слов: «autocad» должен
+        найти «AutoCAD 2026 — Русская версия», а «word» не должен
+        найти «Password Manager».
+
+        `fuzzy=True` включает запасной нечёткий путь. Он нужен там,
+        где результат показывают человеку, а не запускают. Включать
+        его по умолчанию нельзя: замеры на реальном списке показали,
+        что верные и ложные совпадения перекрываются — «стим» к Steam
+        и «chrome» к Heroes III Launcher дают одно и то же 0.67, —
+        и открыть не то хуже, чем спросить.
         """
         query_variants = _variants(query)
         if not query_variants:
@@ -302,7 +320,44 @@ class WindowsPlatform:
                         best = (quality, app)
                     break
 
-        return best[1] if best else None
+        if best is not None:
+            return best[1]
+        if not fuzzy:
+            return None
+        return self._find_fuzzy(query_variants)
+
+    def _find_fuzzy(self, query_variants: set[str]) -> AppInfo | None:
+        """Запасной нечёткий поиск, когда точного совпадения нет.
+
+        Требование отрыва от второго места не украшение: любое слово
+        находит что-нибудь похожее. Если два кандидата почти равны —
+        непонятно, что имелось в виду, и открывать что-то наугад хуже,
+        чем спросить.
+        """
+        import difflib
+
+        scored: list[tuple[float, AppInfo]] = []
+        for app in self.list_apps():
+            best = 0.0
+            for source in (app.name, *app.aliases):
+                for candidate in _name_forms(source):
+                    for query_form in query_variants:
+                        score = difflib.SequenceMatcher(
+                            None, query_form, candidate).ratio()
+                        if score > best:
+                            best = score
+            if best >= FUZZY_MIN_SCORE:
+                scored.append((best, app))
+
+        if not scored:
+            return None
+
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        if len(scored) > 1 and scored[0][0] - scored[1][0] < FUZZY_MIN_GAP:
+            log.debug("Нечёткий поиск: кандидаты почти равны (%s / %s)",
+                      scored[0][1].name, scored[1][1].name)
+            return None
+        return scored[0][1]
 
     def suggest_apps(self, query: str, *, limit: int = 5,
                      min_score: float = 0.55) -> list[AppInfo]:
@@ -579,8 +634,7 @@ class WindowsPlatform:
             return True
 
         if Path(target).exists():
-            os.startfile(target)  # noqa: S606 - намеренно, путь от пользователя/конфига
-            return True
+            return _start_file(target)
 
         # Может быть URL.
         if target.lower().startswith(("http://", "https://", "ftp://")):
@@ -589,8 +643,7 @@ class WindowsPlatform:
         # Иначе ищем как имя файла/папки.
         expanded = _expand_windows_path(target)
         if expanded:
-            os.startfile(expanded)  # noqa: S606
-            return True
+            return _start_file(expanded)
         return False
 
     # --- питание ----------------------------------------------------------
@@ -1014,6 +1067,103 @@ def _well_known_dir(raw: str) -> str | None:
     return output if output and Path(output).exists() else None
 
 
+#: Порог для подсказки по имени файла.
+#:
+#: 0,66 проверен и отвергнут: на этой границе «отчет» начинает
+#: предлагать «тест.txt» — совпадение случайное, и человек открыл бы
+#: не тот файл. Ложная подсказка хуже отсутствующей: отсутствие
+#: заметно, ошибка же незаметна и приводит к работе с чужим документом.
+#:
+#: Побочный эффект строгости: «отчет» не находит «Отчёт2026.pdf».
+#: Это осознанно — запрос без года неоднозначен.
+PATH_SUGGEST_SCORE = 0.72
+
+
+def _start_file(path: str) -> bool:
+    """Открывает файл связанным приложением.
+
+    `os.startfile` бросает исключение не только когда файла нет, но и
+    когда приложение не назначено: Windows показывает диалог выбора,
+    и если его закрыть — прилетает `OSError 1223`. Раньше это уходило
+    наверх, и человек слышал «Что-то сломалось» вместо ответа.
+
+    Возвращаем False: навык скажет «не удалось открыть», и это правда.
+    """
+    try:
+        os.startfile(path)  # noqa: S606 - путь от пользователя или конфига
+        return True
+    except OSError as exc:
+        log.info("Не удалось открыть %s: %s", path, exc)
+        return False
+
+
+def _fold(text: str) -> str:
+    """Вид имени для сравнения: нижний регистр, «ё» приравнена к «е».
+
+    «Ё» — отдельная буква, но человек ставит её где попало: назовёт файл
+    `Отчёт`, а навык разберёт фразу как `отчет` (нормализация ради
+    сопоставления с командами). Без приравнивания файл не находится
+    никогда — и это выглядит как «чувствительность к регистру», хотя
+    регистр тут ни при чём.
+    """
+    return (text or "").lower().replace("ё", "е")
+
+
+def _path_forms(raw: str) -> set[str]:
+    """Формы имени файла: целиком и без расширения.
+
+    Без второго варианта поиск бесполезен: человек говорит «открой файл
+    отчёт», а на диске лежит `Отчёт.docx`. Требовать расширение — значит
+    требовать то, чего человек не произносил.
+    """
+    folded = _fold(raw.strip().strip('"'))
+    if not folded:
+        return set()
+    forms = {folded}
+    stem = os.path.splitext(folded)[0]
+    if stem and stem != folded:
+        forms.add(stem)
+    return forms
+
+
+def _user_roots() -> list[Path]:
+    home = Path(os.environ.get("USERPROFILE", str(Path.home())))
+    return [home / name for name in ("Desktop", "Documents", "Downloads",
+                                     "Pictures")]
+
+
+def _score_against(name: str, wanted: set[str]) -> float:
+    import difflib
+
+    forms = _path_forms(name)
+    if not forms:
+        return 0.0
+    return max(difflib.SequenceMatcher(None, w, f).ratio()
+               for w in wanted for f in forms)
+
+
+def suggest_paths(query: str, *, limit: int = 3) -> list[str]:
+    """Похожие файлы и папки — для ответа «не нашёл, может быть…»."""
+    wanted = _path_forms(query)
+    if not wanted:
+        return []
+
+    scored: list[tuple[float, str]] = []
+    for root in _user_roots():
+        if not root.exists():
+            continue
+        try:
+            for found in root.rglob("*"):
+                score = _score_against(found.name, wanted)
+                if score >= PATH_SUGGEST_SCORE:
+                    scored.append((score, found.name))
+        except OSError:
+            continue
+
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    return [name for _score, name in scored[:limit]]
+
+
 def _expand_windows_path(raw: str) -> str | None:
     """Понимает сокращения путей: %USERPROFILE%\\Downloads, ~\\ и т.п."""
     expanded = os.path.expandvars(raw)
@@ -1030,25 +1180,33 @@ def _expand_windows_path(raw: str) -> str | None:
     if path.exists():
         return str(path)
 
-    # Поиск по имени файла в пользовательских папках.
-    name = path.name.lower()
-    roots = [
-        Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Desktop",
-        Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Documents",
-        Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Downloads",
-        Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Pictures",
-    ]
-    for root in roots:
-        if not root.exists():
-            continue
-        try:
-            for found in root.rglob("*"):
-                if found.is_file() and found.name.lower() == name:
-                    return str(found)
-                if found.is_dir() and found.name.lower() == name:
-                    return str(found)
-        except Exception:
-            continue
+    # Поиск по имени в пользовательских папках.
+    #
+    # Только точное совпадение с учётом «ё» и без расширения. Ближе
+    # не ищем: открывать файл по догадке — это уже не то действие,
+    # о котором просил человек. Близкие имена навык показывает как
+    # подсказку, и решение принимает человек.
+    #
+    # Два прохода, а не один: формы «1.pdf» и «1.txt» пересекаются
+    # по именам без расширения, и один проход открыл бы не тот файл.
+    # Сначала полное имя, затем основа — как допущение.
+    folded = _fold(raw.strip().strip('"'))
+    if not folded:
+        return None
+    whole = {folded}
+    stem = {os.path.splitext(folded)[0] or folded}
+
+    for forms in (whole, stem):
+        for root in _user_roots():
+            if not root.exists():
+                continue
+            try:
+                for found in root.rglob("*"):
+                    if _path_forms(found.name) & forms:
+                        return str(found)
+            except OSError:
+                continue
+    return None
     return None
 
 
