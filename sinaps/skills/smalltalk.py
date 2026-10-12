@@ -3,11 +3,18 @@
 «Что ты умеешь» здесь — лучший пример пользы единой декларации: список
 команд генерируется из реестра навыков, поэтому справка не может разойтись
 с реальными возможностями. Забыть добавить команду в справку невозможно.
+
+Но генерация правильного текста — только полдела. Раньше ассистент
+обещал «подробности на экране», а `display` уходил только в консоль,
+которой в режиме трея нет. Человек слышал обещание и не получал ничего.
+Поэтому ответ теперь ещё и открывает панель возможностей — то, что он
+действенно показывает.
 """
 
 from __future__ import annotations
 
-from ..skills.base import Response, Skill
+from . import taxonomy
+from .base import Response, Skill
 
 
 def register(registry=None) -> Skill:
@@ -35,19 +42,33 @@ def register(registry=None) -> Skill:
     async def capabilities(ctx, slots):  # noqa: ANN001
         if registry is None:
             return Response(speech="Не знаю, что умею")
-        # Голосом длинный список не пересказать — отдаём кратко и подробно на экран.
-        groups = {}
+
+        groups: dict[str, int] = {}
         for spec in registry.specs:
             if spec.hidden:
                 continue
-            group = spec.name.split(".")[0]
-            groups.setdefault(group, 0)
-            groups[group] += 1
+            key = taxonomy.group_of(spec.name)
+            groups[key] = groups.get(key, 0) + 1
 
-        parts = ", ".join(f"{g} — {c}" for g, c in sorted(groups.items()))
+        total = sum(groups.values())
+        # Ходовые группы — по убыванию количества команд. Порядок из
+        # таксономии тут не годится: человек слышит то, чем пользуется.
+        top = [k for k, _ in sorted(groups.items(), key=lambda kv: -kv[1])]
+        # Группа «Разговор» — это приветствия и «кто ты». Перечислять её
+        # рядом с громкостью и программами обидно: человек услышит
+        # «умею поговорить» и решит, что ему предлагают поболтать.
+        spoken = [k for k in top if k != "smalltalk"]
+
+        # Раньше здесь стояло «Подробности на экране». Экран появлялся
+        # только в консоли, а в режиме трея её нет — ассистент обещал
+        # то, чего не было. Теперь обещаем ровно то, что делаем:
+        # открываем панель, и это видно.
         return Response(
-            speech=f"Умею {sum(groups.values())} команд: {parts}. Подробности на экране.",
+            speech=(f"Умею {total} команд. Чаще всего это "
+                    f"{taxonomy.speech_names(spoken)}. "
+                    f"Открыл панель с примерами."),
             display=registry.help_text(),
+            show_panel=True,
         )
 
     skill.command(
