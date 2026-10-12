@@ -81,6 +81,7 @@ class QtHost:
         self.tray = None
         self.history_window = None
         self.settings_window = None
+        self.panel = None
 
         self.loop: asyncio.AbstractEventLoop | None = None
         self._loop_thread: threading.Thread | None = None
@@ -257,7 +258,15 @@ class QtHost:
             bridge.status_changed.emit(
                 "error", str(event.payload.get("detail", ""))[:120])
 
+        async def _on_panel(event) -> None:
+            # Навык попросил показать панель. Событие приходит из
+            # asyncio-потока, поэтому отдаём Qt-сигнал: он сам
+            # разложится в очередь приёмника. Обращаться к виджету
+            # из этого потока нельзя — Qt к этому не готов.
+            bridge.panel_requested.emit()
+
         bus.on("state_changed")(_on_state)
+        bus.on("panel_requested")(_on_panel)
         bus.on("error")(_on_error)
 
     async def _report_state(self) -> None:
@@ -285,14 +294,29 @@ class QtHost:
     # --- трей -> ассистент -------------------------------------------------
 
     def _call_async(self, coro_factory: Callable[[], Any]) -> None:
-        """Безопасно отправляет корутину в asyncio-поток."""
+        """Безопасно отправляет действие в asyncio-поток.
+
+        Вызов выполняется уже внутри event loop, а не заранее: фабрика
+        может вернуть корутину, готовую задачу или вообще ничего.
+        Раньше результат сразу скармливался `ensure_future`, и
+        `handle_text_input` (возвращает `Task`) на этом падал — кнопка
+        «Попробовать» в панели не работала бы.
+        """
         if self.loop is None or self.loop.is_closed():
             return
+
+        def _invoke() -> None:
+            try:
+                result = coro_factory()
+                if asyncio.isfuture(result) or asyncio.iscoroutine(result):
+                    asyncio.ensure_future(result)
+            except Exception:                         # noqa: BLE001
+                log.exception("Действие из интерфейса упало")
+
         try:
-            self.loop.call_soon_threadsafe(
-                lambda: asyncio.ensure_future(coro_factory(), loop=self.loop))
+            self.loop.call_soon_threadsafe(_invoke)
         except RuntimeError:
-            log.debug("Event loop закрыт — действие из трея пропущено")
+            log.debug("Event loop закрыт — действие из интерфейса пропущено")
 
     def _connect_tray(self) -> None:
         assert self.tray is not None
@@ -302,9 +326,56 @@ class QtHost:
         bridge.speak_toggled.connect(self._toggle_speak)
         bridge.history_requested.connect(self._show_history)
         bridge.settings_requested.connect(self._show_settings)
+        bridge.capabilities_requested.connect(self._show_panel)
+        bridge.panel_requested.connect(self._show_panel)
         bridge.status_window_requested.connect(self._show_history)
         bridge.clear_history_requested.connect(self._clear_history)
         bridge.quit_requested.connect(self._quit_app)
+
+    # --- панель возможностей ------------------------------------------------
+
+    def _panel_data(self):
+        """Собирает панель из реестра навыков.
+
+        Реестр живёт в asyncio-потоке, а панель — в Qt-потоке. Данные
+        пересекают границу потоков простым объектом без Qt, поэтому
+        пересчёт здесь безопаснее, чем доступ к реестру из виджета.
+        """
+        from .panel_data import build_cards
+
+        registry = getattr(self._runtime, "registry", None)
+        if registry is None:
+            log.warning("Панель: реестр навыков недоступен")
+            return None
+        try:
+            return build_cards(registry.specs)
+        except Exception:                             # noqa: BLE001
+            log.exception("Панель: не удалось собрать данные")
+            return None
+
+    def _show_panel(self, *_args) -> None:
+        """Показывает панель. Вызывается из трея и от навыка."""
+        data = self._panel_data()
+        if data is None or not data.groups:
+            self._notify("Sinaps", "Не удалось собрать список возможностей.")
+            return
+
+        if self.panel is None:
+            from .panel import Panel
+
+            self.panel = Panel()
+            # Фраза уходит в ассистента так, будто её сказали голосом.
+            self.panel.phrase_chosen.connect(self._say_to_assistant)
+
+        self.panel.set_data(data)
+        self.panel.show()
+
+    def _say_to_assistant(self, phrase: str) -> None:
+        """Отправляет фразу из панели в обычный конвейр разговора."""
+        runtime = self._runtime
+        if runtime is None or runtime.conversation is None:
+            return
+        self._call_async(lambda: runtime.conversation.handle_text_input(phrase))
 
     def _toggle_pause(self, paused: bool) -> None:
         self._paused = paused

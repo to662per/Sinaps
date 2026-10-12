@@ -121,10 +121,19 @@ class SkillEngine:
 
     async def _execute(self, ctx: DialogContext, match: Match) -> Reply:
         response = await self.registry.execute(match, ctx)
+
+        # Просьба открыть панель уходит в интерфейс отдельным событием.
+        # Отправляем здесь, а не в конвейере: конвейер ничего не знает
+        # про панель, и знать не должен — это забота слоя `ui`.
+        if response.show_panel and self.bus is not None:
+            await self.bus.emit(EventType.PANEL_REQUESTED,
+                                source=match.spec.name)
+
         return Reply(
             speech=response.speech,
             display=response.display or response.speech,
             follow_up=response.follow_up,
+            show_panel=response.show_panel,
             # Намерение и слоты едут в ответе: без них в истории разговоров
             # остаётся голый текст, и разобраться, почему фраза не сработала,
             # невозможно — а это ровно то, ради чего история нужна.

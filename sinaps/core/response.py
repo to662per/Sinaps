@@ -19,6 +19,8 @@ class Reply:
     speech: str                                   # что озвучить
     display: str | None = None                    # что показать на экране
     follow_up: str | None = None                  # подсказка для следующего шага
+    #: Интерфейс должен открыть панель возможностей. См. `skills/base.py`.
+    show_panel: bool = False
     meta: dict[str, Any] = field(default_factory=dict)
 
     def __str__(self) -> str:

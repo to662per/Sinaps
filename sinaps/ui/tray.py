@@ -111,6 +111,12 @@ class Bridge(QObject):
     speak_toggled = Signal(bool)
     history_requested = Signal()
     settings_requested = Signal()
+    capabilities_requested = Signal()
+    #: Ассистент попросил открыть панель. Испускается из asyncio-потока,
+    #: поэтому ходить через сигнал, а не через `QTimer.singleShot`:
+    #: таймер создаётся в том потоке, из которого вызван, и в чужом
+    #: потоке без Qt-цикла просто не срабатывает.
+    panel_requested = Signal()
     clear_history_requested = Signal()
     quit_requested = Signal()
     status_window_requested = Signal()
@@ -166,6 +172,14 @@ class TrayIcon(QSystemTrayIcon):
         history_action = QAction("История…", menu)
         history_action.triggered.connect(self.bridge.history_requested)
         menu.addAction(history_action)
+
+        # Панель нужна не только голосу: по требованию пропала может
+        # оказаться любая микрофонная кнопка, и тогда спросить нечем.
+        capabilities_action = QAction("Что я умею…", menu)
+        capabilities_action.setToolTip("Показать панель с примерами команд")
+        capabilities_action.triggered.connect(
+            self.bridge.capabilities_requested)
+        menu.addAction(capabilities_action)
 
         settings_action = QAction("Настройки…", menu)
         settings_action.triggered.connect(self.bridge.settings_requested)

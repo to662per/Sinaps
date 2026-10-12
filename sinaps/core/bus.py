@@ -52,6 +52,11 @@ class EventType(str, enum.Enum):
     SKILL_FINISHED = "skill_finished"
     CONFIRM_REQUESTED = "confirm_requested"
 
+    # Интерфейс
+    #: Открыть панель возможностей. Отправляется навыком через
+    #: `Response.show_panel`, слушает только `ui`.
+    PANEL_REQUESTED = "panel_requested"
+
     # Ответ
     RESPONSE_READY = "response_ready"
     TTS_STARTED = "tts_started"
