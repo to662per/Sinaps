@@ -152,6 +152,20 @@ def _short(value: object) -> str:
     return text if len(text) <= 20 else text[:17] + "..."
 
 
+async def cmd_setup(args: argparse.Namespace) -> int:
+    """Одноразовая установка моделей. Не требует работающего ассистента."""
+    from .setup import main as setup_main
+
+    argv: list[str] = []
+    if getattr(args, "check", False):
+        argv.append("--check")
+    if getattr(args, "model", None):
+        argv += ["--model", args.model]
+    if getattr(args, "yes", False):
+        argv.append("--yes")
+    return setup_main(argv)
+
+
 async def cmd_selftest(_args: argparse.Namespace) -> int:
     """Проверяет окружение: конфиг, аудио, движки. Без обращения к микрофону."""
     print(BANNER)
@@ -987,6 +1001,18 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command")
 
     sub.add_parser("run", help="обычный запуск (по умолчанию)")
+    # --- установка (одноразовая) -----------------------------------------
+    p = sub.add_parser(
+        "setup",
+        help="одноразовая установка: скачать модели и проверить звук")
+    p.add_argument("--check", action="store_true",
+                   help="только проверить, ничего не скачивая")
+    p.add_argument("--model", default=None,
+                   help="какую модель распознавания качать "
+                        "(по умолчанию — из config.yaml)")
+    p.add_argument("--yes", action="store_true",
+                   help="не спрашивать подтверждение перед скачиванием")
+
     sub.add_parser("selftest", help="проверка окружения без микрофона")
     sub.add_parser("devices", help="список аудиоустройств")
     sub.add_parser("metrics", help="показать задержки")
@@ -1033,6 +1059,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 _COMMANDS = {
+    "setup": cmd_setup,
     "selftest": cmd_selftest,
     "devices": cmd_devices,
     "check-mic": cmd_check_mic,
