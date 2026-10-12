@@ -40,6 +40,14 @@ class Transcript:
     engine: str = ""
     elapsed: float = 0.0  # сколько заняло распознавание, секунды
 
+    #: Почему результат пустой: "" (неизвестно), "too_quiet" (фраза тише
+    #: порога), "no_speech" (модель не нашла речи).
+    #:
+    #: Без этого поля «микрофон молчит» и «вы говорили неразборчиво»
+    #: выглядят одинаково — обе пустые строки. Пользователь в обоих
+    #: случаях решает, что сломался ассистент, и чинит не то.
+    rejected: str = ""
+
     @property
     def is_empty(self) -> bool:
         return not self.text.strip()
@@ -63,6 +71,10 @@ class STTEngine(abc.ABC):
         self.language = language
         self.normalize_audio = normalize_audio
         self.min_dbfs = min_dbfs
+        # Фразу отбил порог громкости. Флаг ставится в `_prepare` и
+        # сбрасывается на каждом вызове, иначе одна тихая фраза задела
+        # бы все последующие на «микрофон молчит».
+        self._too_quiet = False
         self._warmed = False
 
     # --- обязательное ------------------------------------------------------
@@ -88,11 +100,14 @@ class STTEngine(abc.ABC):
 
     def transcribe_sync(self, audio: np.ndarray) -> Transcript:
         """Синхронный вызов (для тестов и офлайн-обработки файлов)."""
+        self._too_quiet = False
         audio = self._prepare(audio)
         started = time.perf_counter()
         result = self._recognize(audio)
         result.elapsed = time.perf_counter() - started
         result.engine = result.engine or self.name
+        if result.is_empty and self._too_quiet:
+            result.rejected = "too_quiet"
         return result
 
     async def transcribe(self, audio: np.ndarray) -> Transcript:
@@ -113,11 +128,15 @@ class STTEngine(abc.ABC):
         # Барьер по громкости — до модели. Тишина и шум не должны попадать
         # в Whisper: там они превращаются в выдуманные фразы («субтитры»,
         # «спокойная музыка»), а распознавание всё равно занимает ~0.5 с.
-        if self.min_dbfs > -120.0 and dbfs(audio) < self.min_dbfs:
-            log.info("Фраза тише %.0f dBFS (порог %.0f) — в модель не иду",
-                     dbfs(audio), self.min_dbfs)
-            return np.zeros(0, dtype=np.float32)
+        if self.min_dbfs > -120.0:
+            level = dbfs(audio)
+            if level < self.min_dbfs:
+                self._too_quiet = True
+                log.info("Фраза тише %.0f dBFS (порог %.0f) — в модель не иду",
+                         level, self.min_dbfs)
+                return np.zeros(0, dtype=np.float32)
 
+        self._too_quiet = False
         audio = np.ascontiguousarray(audio, dtype=np.float32)
         if self.normalize_audio:
             # Нормализация громкости и обрезка тишины по краям заметно

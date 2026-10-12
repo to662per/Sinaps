@@ -98,6 +98,8 @@ class ListeningPipeline:
         self._listen_until: float | None = None  # deadline ожидания речи
         self._activated = not require_activation
         self._paused = False
+        # Предупреждение о немом микрофоне уже прозвучало?
+        self._quiet_warned = False
         self._wake_event = asyncio.Event()
         self._turn: TurnMetrics | None = None
         # Аудио, накопленное ДО начала речи. Подклеивается к фразе, чтобы
@@ -390,12 +392,17 @@ class ListeningPipeline:
 
         if transcript.is_empty:
             self.stats.empty += 1
+            reason = ("too_quiet" if transcript.rejected == "too_quiet"
+                      else "empty_transcript")
             await self.bus.emit(EventType.TRANSCRIPT_FINAL, text="", confidence=0.0,
-                                engine=transcript.engine, empty=True)
-            await self.session.transition(State.IDLE, reason="empty_transcript")
+                                engine=transcript.engine, empty=True,
+                                rejected=transcript.rejected)
+            await self.session.transition(State.IDLE, reason=reason)
+            await self._warn_too_quiet()
             return
 
         self.stats.utterances += 1
+        await self.reset_quiet_warning()
 
         # ВАЖНО: состояние меняется ДО публикации события, а не после.
         # `bus.publish` ждёт обработчики, и `_on_transcript` отрабатывает
@@ -414,6 +421,36 @@ class ListeningPipeline:
         )
 
     # --- сторож ------------------------------------------------------------
+
+    async def _warn_too_quiet(self) -> None:
+        """Один раз говорит, что микрофон молчит.
+
+        Молчание here — худший вариант отказа. Человек нажимает кнопку,
+        говорит и не получает ни слова: он не знает, что его слышат, и
+        начинает чинить не то (переустанавливать программу, менять
+        настройки). Сказанное вслух «я тебя не слышу» сразу ставит на
+        правильный след.
+
+        Повторять нельзя: если микрофон молчит постоянно, десять подряд
+        произнесённых фраз превратятся в собственный эхо-цикл, который
+        самому микрофону и мешает. Поэтому предупреждение одно, а
+        дальше — только в лог.
+        """
+        if self._quiet_warned:
+            log.debug("Микрофон молчит, повторно не предупреждаю")
+            return
+        self._quiet_warned = True
+        log.warning("Микрофон молчит: фраза тише порога. "
+                    "Проверь вход и уровень записи (run_sinaps.bat check-mic)")
+        await self.bus.emit(
+            EventType.RESPONSE_READY,
+            text="Я тебя не слышу. Проверь микрофон.",
+            display="микрофон молчит: фраза слишком тихая",
+            source="system")
+
+    async def reset_quiet_warning(self) -> None:
+        """Сброс предупреждения — после удачной фразы."""
+        self._quiet_warned = False
 
     async def _watchdog(self) -> None:
         """Снимает сессию, если она «залипла» в нерабочем состоянии.
