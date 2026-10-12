@@ -1,0 +1,27 @@
+# Окружение и модели
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Модели и данные (качаются автоматически, весят сотни МБ)
+models/
+data/
+!data/.gitkeep
+
+# Логи
+*.log
+
+# Записи микрофона
+*.wav
+!tests/fixtures/*.wav
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,63 @@
+[project]
+name = "sinaps"
+version = "0.1.0"
+description = "Sinaps — локальный голосовой ассистент для ПК"
+readme = "README.md"
+# ВАЖНО: ctranslate2 (движок faster-whisper) не собирается под 3.13+,
+# поэтому проект жёстко ограничен 3.12.
+requires-python = ">=3.12,<3.13"
+
+dependencies = [
+    "numpy>=1.26,<3",
+    "sounddevice>=0.4.6",
+    "psutil>=5.9",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+# --- Распознавание речи (STT) ---------------------------------------------
+stt = [
+    "faster-whisper>=1.1.0",
+]
+# Ускорение STT на видеокарте (NVIDIA). Без этого faster-whisper работает на CPU.
+stt-cuda = [
+    "faster-whisper>=1.1.0",
+    "nvidia-cublas-cu12>=12.6",
+    "nvidia-cudnn-cu12>=9.0",
+]
+# --- Синтез речи (TTS) ----------------------------------------------------
+tts = [
+    "torch>=2.2",
+    "torchaudio>=2.2",
+]
+# --- Определение речи (VAD) ----------------------------------------------
+vad = [
+    "silero-vad>=5.1",
+    "onnxruntime>=1.17",
+]
+# --- Управление ПК и хоткеи (этап 2) -------------------------------------
+pc = [
+    "pynput>=1.7.6",
+    "pyperclip>=1.8",
+]
+
+[project.scripts]
+sinaps = "sinaps.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["sinaps*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
