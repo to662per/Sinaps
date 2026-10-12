@@ -184,6 +184,13 @@ class QtHost:
         self._ready.set()
         log.info("Ассистент готов, интерфейс активен")
 
+        # Приветствие после готовности, а не раньше: пока грузятся модели,
+        # говорить нечем. Идёт через обычный конвейер разговора, поэтому
+        # работают синтез, прерывание и пауза — отдельный путь не нужен.
+        if self.cfg.tts.greet_on_start:
+            asyncio.get_running_loop().call_later(
+                1.0, lambda: runtime.conversation.handle_text_input("привет"))
+
         # Ждём сигнала выхода.
         while not self._quit.is_set():
             await asyncio.sleep(0.2)

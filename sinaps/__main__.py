@@ -932,6 +932,12 @@ async def _run_interactive_locked(
 
     print(runtime.describe())
     console.info("Пишите команду в консоль" + (" или говорите." if with_audio else "."))
+    if cfg.tts.greet_on_start:
+        # Тот же приём, что и в трее: приветствие идёт через конвейер
+        # разговора, поэтому использует синтез и прерывание. Отдельный
+        # вызов движка в обход конвейра создал бы второй путь козвуку.
+        asyncio.get_running_loop().call_later(
+            1.0, lambda: runtime.conversation.handle_text_input("привет"))
     if with_audio and runtime.trigger is not None:
         if runtime.trigger_error:
             # Молчащий микрофон хуже явной ошибки: пользователь должен

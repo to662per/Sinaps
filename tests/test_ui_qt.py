@@ -410,6 +410,17 @@ class TestAutostart:
         assert "pythonw" in command.lower(), f"команда {command!r} откроет консоль"
         assert '"' in command, "путь с пробелами должен быть в кавычках"
 
+    def test_command_starts_tray_mode(self):
+        """Без `--tray` автозапуск поднимает консольный режим.
+
+        Под pythonw окна консоли нет, интерактивный ввод недоступен —
+        ассистент висит невидимым и не отвечает. При загрузке Windows
+        это выглядит как «программа молча сломалась».
+        """
+        from sinaps.platform import autostart
+
+        assert "--tray" in autostart._command()      # noqa: SLF001
+
     def test_entry_name_is_stable_and_unique(self, tmp_path):
         """Две копии проекта не должны затирать записи друг друга."""
         from sinaps.platform import autostart

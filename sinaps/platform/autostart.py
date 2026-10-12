@@ -48,11 +48,17 @@ def _pythonw() -> str:
 
 
 def _command(project_root: Path | None = None) -> str:
-    """Полная строка запуска, которую записываем в реестр."""
+    """Полная строка запуска, которую записываем в реестр.
+
+    Обязателен `--tray`. Без него pythonw стартует консольный режим:
+    окна консоли нет, интерактивный ввод недоступен, и ассистент висит
+    невидимым. При старте Windows это выглядит как «программа запустилась
+    и молчит», хотя на самом деле сломана.
+    """
     root = Path(project_root) if project_root else Path(__file__).resolve().parent.parent.parent
     pythonw = _pythonw()
     module = f'"{pythonw}"' if pythonw else f'"{sys.executable}" -w'
-    return f'{module} -m sinaps'
+    return f'{module} -m sinaps --tray'
 
 
 def _winreg():
