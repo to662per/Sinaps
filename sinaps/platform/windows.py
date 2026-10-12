@@ -711,6 +711,46 @@ def _launch_path(name: str) -> bool:
     return False
 
 
+def _run_powershell(script: str, timeout: float = 10.0) -> str:
+    """Запускает PowerShell и возвращает его вывод текстом.
+
+    Кодировка
+    ---------
+    `subprocess.run(..., text=True)` расшифровывает вывод в кодировку
+    системы. У нас это cp1251, а PowerShell 5.1 при перенаправлении в
+    трубу пишет в консольной кодировке, где встречаются байты, не
+    описанные в cp1251 (0x98, 0x99 и соседние). Декодер падает в
+    фоновом потоке, `stdout` приходит как `None` — и навык падает
+    вместо ответа:
+
+        UnicodeDecodeError: 'charmap' codec can't decode byte 0x98
+        AttributeError: 'NoneType' object has no attribute 'splitlines'
+
+    Ловить это на стороне вызова бесполезно: `AttributeError` возникает
+    уже во время чтения потока, минуя `except Exception`.
+
+    Поэтому две меры сразу: заставляем PowerShell отдавать UTF-8 и
+    расшифровываем с заменой нечитаемых байтов. Имена ярлыков содержат
+    кириллицу — потерять их значит потерять сами ярлыки.
+    """
+    # Вывод в UTF-8 независимо от кодовой страницы в системе.
+    preamble = "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             preamble + script],
+            capture_output=True, timeout=timeout,   # байты, не текст
+        )
+    except subprocess.TimeoutExpired:
+        log.debug("PowerShell не ответил за %.0f с", timeout)
+        return ""
+    except OSError:
+        log.debug("Не удалось запустить PowerShell", exc_info=True)
+        return ""
+
+    return (result.stdout or b"").decode("utf-8", errors="replace")
+
+
 def _scan_installed_apps() -> list[AppInfo]:
     """Ищет установленные программы: ярлыки меню «Пуск» + реестр.
 
@@ -766,17 +806,10 @@ def _shortcuts_batch() -> list[AppInfo]:
         "}\n"
     )
 
-    try:
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-            capture_output=True, text=True, timeout=25,
-        )
-    except Exception:
-        log.debug("Не удалось прочитать ярлыки", exc_info=True)
-        return []
+    output = _run_powershell(script, timeout=25)
 
     apps: list[AppInfo] = []
-    for line in result.stdout.splitlines():
+    for line in output.splitlines():
         if "|" not in line:
             continue
         shortcut_str, target = line.rsplit("|", 1)
@@ -909,15 +942,9 @@ def _recent_files(folder: Path) -> list[Path]:
 
 
 def _is_laptop() -> bool:
-    try:
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
-             "(Get-CimInstance Win32_Battery) -ne $null"],
-            capture_output=True, text=True, timeout=5,
-        )
-        return result.stdout.strip().lower() == "true"
-    except Exception:
-        return False
+    output = _run_powershell(
+        "(Get-CimInstance Win32_Battery) -ne $null", timeout=5)
+    return output.strip().lower() == "true"
 
 
 def _set_brightness_wmi(percent: int) -> bool:
@@ -932,9 +959,59 @@ def _set_brightness_wmi(percent: int) -> bool:
             capture_output=True, timeout=5, check=True,
         )
         return True
-    except Exception:
+    except subprocess.TimeoutExpired:
+        log.debug("PowerShell не ответил вовремя — яркость не изменена")
+        return False
+    except (subprocess.CalledProcessError, OSError):
         log.debug("Не удалось изменить яркость", exc_info=True)
         return False
+
+
+#: Русские названия системных папок -> реальные каталоги.
+#:
+#: Имена соответствуют API Known Folder, поэтому работают при любой
+#: языковой версии Windows и при переносе профиля. Раньше разбирались
+#: только английские: навык с примером «открой папку загрузки» на
+#: русской Windows не мог сработать в принципе — отвечал «не нашёл»,
+#: хотя папка рядом.
+_WELL_KNOWN: dict[str, str] = {
+    "desktop": "Desktop",
+    "рабочий стол": "Desktop",
+    "документы": "Documents",
+    "documents": "Documents",
+    "загрузки": "Downloads",
+    "downloads": "Downloads",
+    "изображения": "Pictures",
+    "картинки": "Pictures",
+    "pictures": "Pictures",
+    "музыка": "Music",
+    "music": "Music",
+    "видео": "Videos",
+    "videos": "Videos",
+    "домашняя папка": "",
+    "home": "",
+}
+
+
+def _well_known_dir(raw: str) -> str | None:
+    """Русское или английское имя системной папки -> путь."""
+    key = raw.strip().strip("\\/").lower()
+    if key not in _WELL_KNOWN:
+        return None
+
+    folder = _WELL_KNOWN[key]
+    home = Path(os.environ.get("USERPROFILE", str(Path.home())))
+    target = home if not folder else home / folder
+    if target.exists():
+        return str(target)
+
+    # Профиль мог быть перенесён: спрашиваем у Windows напрямую.
+    script = (
+        f"$p = [Environment]::GetFolderPath('{folder or 'UserProfile'}'); "
+        "if ($p -and (Test-Path $p)) { Write-Output $p }"
+    )
+    output = _run_powershell(script, timeout=5).strip()
+    return output if output and Path(output).exists() else None
 
 
 def _expand_windows_path(raw: str) -> str | None:
@@ -942,6 +1019,12 @@ def _expand_windows_path(raw: str) -> str | None:
     expanded = os.path.expandvars(raw)
     if expanded.startswith("~"):
         expanded = str(Path.home() / expanded[1:].lstrip("\\/"))
+
+    # Сначала известные папки: при перенесённом профиле простой поиск
+    # по имени их не найдёт, а положить их вручную тоже не выйдет.
+    known = _well_known_dir(raw)
+    if known:
+        return known
 
     path = Path(expanded)
     if path.exists():
