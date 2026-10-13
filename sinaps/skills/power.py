@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+from ..nlu.verbs import verb
 from ..platform.base import PowerAction
 from ..skills.base import Response, Skill
 
@@ -52,7 +53,8 @@ def register() -> Skill:
         "shutdown",
         shutdown,
         patterns=[
-            r"^(?:выключи|shutdown|заверши работу)\s*(?:компьютер|комп|ноутбук|пк)?$",
+            rf"^(?:{verb('выключить')}|shutdown|заверши работу)\s*"
+            r"(?:компьютер|комп|ноутбук|пк|всё|все)?$",
             r"^погаси компьютер$",
         ],
         examples=["выключи компьютер", "заверши работу"],
@@ -65,8 +67,7 @@ def register() -> Skill:
         "restart",
         restart,
         patterns=[
-            r"^(?:перезагрузи|перезапусти|restart)\s*(?:компьютер|комп|ноутбук|пк)?$",
-            r"^перезапусти всё$",
+            rf"^(?:{verb('перезагрузить')}|restart)\s*(?:компьютер|комп|ноутбук|пк|всё|все)?$",
         ],
         examples=["перезагрузи компьютер", "перезапусти всё"],
         dangerous=True,
@@ -78,7 +79,7 @@ def register() -> Skill:
         "sleep",
         sleep,
         patterns=[
-            r"^(?:усыпи|спящий режим|сон|засыпай)\s*(?:компьютер|комп|ноутбук)?$",
+            rf"^(?:{verb('усыпить')}|спящий режим|сон)\s*(?:компьютер|комп|ноутбук|всё|все)?$",
             r"^sleep$",
         ],
         examples=["усыпи компьютер", "спящий режим"],
@@ -91,7 +92,7 @@ def register() -> Skill:
         "lock",
         lock,
         patterns=[
-            r"^(?:заблокируй|запри|блокируй)\s*(?:экран|компьютер|комп)?$",
+            rf"^(?:{verb('заблокировать')})\s*(?:экран|компьютер|комп)?$",
             r"^lock$",
         ],
         examples=["заблокируй экран", "запри компьютер"],

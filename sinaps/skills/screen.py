@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+from ..nlu.verbs import verb, verb_with
 from ..skills.base import Response, Skill, SlotSpec
 
 
@@ -36,7 +37,7 @@ def register() -> Skill:
         "screenshot",
         screenshot,
         patterns=[
-            r"^(?:сделай|сними|сделай) скриншот$",
+            rf"^(?:{verb('сделать', 'снимать')}) скриншот$",
             r"^скриншот$",
             r"^снимок экрана$",
             r"^screenshot$",
@@ -88,7 +89,7 @@ def register_clipboard() -> Skill:
         "copy",
         copy,
         patterns=[
-            r"^(?:скопируй|запомни)\s+(?P<text>.+)$",
+            rf"^(?:{verb('копировать', 'запомнить')})\s+(?P<text>.+)$",
             r"^copy\s+(?P<text>.+)$",
         ],
         examples=["скопируй мой пароль", "запомни номер телефона"],

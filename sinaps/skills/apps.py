@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ..nlu.verbs import verb, verb_with
 from ..skills.base import Response, Skill, SlotSpec
 
 
@@ -80,7 +81,7 @@ def register() -> Skill:
         "open",
         open_app,
         patterns=[
-            r"^(?:открой|открыть|запусти|запустить|включи)\s+(?P<name>.+)$",
+            rf"^(?:{verb('открыть', 'запустить', 'включить')})\s+(?P<name>.+)$",
             r"^launch\s+(?P<name>.+)$",
             r"^open\s+(?P<name>.+)$",
         ],
@@ -95,7 +96,8 @@ def register() -> Skill:
         "close",
         close_app,
         patterns=[
-            r"^(?:закрой|закрыть|выключи|убий)\s+(?:программу\s+|приложение\s+)?(?P<name>.+)$",
+            rf"^(?:{verb('закрыть', 'выключить')}|убий)\s+"
+            r"(?:программу\s+|приложение\s+)?(?P<name>.+)$",
             r"^close\s+(?P<name>.+)$",
         ],
         examples=["закрой браузер", "выключи программу steam"],
