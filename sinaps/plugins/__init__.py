@@ -11,4 +11,4 @@
 
 from __future__ import annotations
 
-__all__ = ["api"]
+__all__ = ["api", "manifest"]
