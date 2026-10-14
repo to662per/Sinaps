@@ -160,6 +160,12 @@ class PluginProcess:
         self._next_id = 0
         self._last_used = 0.0
         self.ready: dict[str, Any] = {}
+        # Состояние привязано к имени плагина, а не к папке: переименовать
+        # папку не значит начать с нуля, и два плагина с разными именами
+        # не видят данных друг друга даже если лежат рядом.
+        from .state import PluginState
+
+        self._state = PluginState(plugin=manifest.name)
 
     # --- жизненный цикл ----------------------------------------------------
 
@@ -243,7 +249,7 @@ class PluginProcess:
         По истечении времени процесс закрывается целиком, следующий
         вызов поднимет новый.
         """
-        from .protocol import OP_RESULT, ProtocolError
+        from .protocol import OP_CAP, OP_RESULT, ProtocolError
         from .protocol import read_message_async, write_message_async
 
         await self.start()
@@ -260,9 +266,26 @@ class PluginProcess:
             "slots": slots or {},
         })
 
+        # Пока идёт обработчик, ребёнок может позвать возможность ядра:
+        # прочитать ключ состояния, записать, спросить список. Поэтому
+        # читаем не один кадр, а цикл — и каждый промежуточный кадр
+        # выполняем и отвечаем. Первая версия читала один кадр и
+        # принимала его за ответ: первый же `ctx.state.get` ломал бы
+        # разговор ошибкой «пришёл ответ не на тот вызов».
+        deadline = asyncio.get_running_loop().time() + timeout
         try:
-            message = await asyncio.wait_for(
-                read_message_async(self._proc.stdout), timeout)
+            while True:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError
+                message = await asyncio.wait_for(
+                    read_message_async(self._proc.stdout), remaining)
+
+                if message.get("op") == OP_CAP:
+                    await self._serve_capability(message)
+                    continue
+                break
+
         except asyncio.TimeoutError as exc:
             await self.stop()
             from ..core.errors import PluginError
@@ -302,6 +325,45 @@ class PluginProcess:
             speech=message.get("speech")
             or f"Плагин «{self.manifest.name}» не сработал")
 
+    async def _serve_capability(self, message: dict[str, Any]) -> None:
+        """Выполнить просьбу плагина и ответить.
+
+        Право проверяется **до** похода в базу, а не после. Проверка
+        после дала бы плагину лишний доступ: он уже выполнил бы запрос,
+        и запрет означал бы «результат не покажем», а не «не делай».
+        """
+        assert self._proc is not None
+        from ..core.errors import PermissionDenied
+        from .protocol import CAP_STATE, OP_CAP_FAIL, OP_CAP_OK
+        from .protocol import write_message_async
+
+        try:
+            cap = message.get("cap")
+            if cap != CAP_STATE:
+                raise PermissionDenied(str(cap or "неизвестное"))
+            if CAP_STATE not in self.granted:
+                raise PermissionDenied(CAP_STATE, self.manifest.name)
+            reply = {"op": OP_CAP_OK,
+                     "value": _state_action(self._state,
+                                            message.get("action") or "",
+                                            message.get("kwargs") or {})}
+        except PermissionDenied as exc:
+            reply = {"op": OP_CAP_FAIL, "type": "PermissionDenied",
+                     "permission": exc.permission, "message": str(exc),
+                     "speech": exc.speech}
+        except Exception as exc:  # noqa: BLE001 — наш код и наша база
+            log.warning("Плагин %s: возможность не сработала — %s: %s",
+                        self.manifest.name, type(exc).__name__, exc)
+            reply = {"op": OP_CAP_FAIL, "type": type(exc).__name__,
+                     "message": str(exc),
+                     "speech": "Плагин не смог воспользоваться состоянием"}
+
+        try:
+            await write_message_async(self._proc.stdin, reply)
+        except (ConnectionError, BrokenPipeError, AttributeError) as exc:
+            log.warning("Плагин %s: ответ на возможность не доставлен — %s",
+                        self.manifest.name, exc)
+
     async def stop(self) -> None:
         """Закрыть процесс. Молчаливый провал здесь — норма."""
         from .protocol import OP_STOP, ProtocolError, write_message_async
@@ -328,6 +390,27 @@ class PluginProcess:
                 await asyncio.wait_for(proc.wait(), 5)
             except (ProcessLookupError, asyncio.TimeoutError):
                 pass
+
+
+#: Что плагин может просить у своего состояния.
+#:
+#: Список явный, а не «любой метод объекта»: иначе появление нового
+#: метода в `PluginState` молча открывало бы плагину новое право, и
+#: никто бы об этом не узнал.
+_STATE_ACTIONS = ("get", "set", "delete", "keys", "all", "clear")
+
+
+def _state_action(state, action: str, kwargs: dict[str, Any]) -> Any:
+    """Одна операция состояния."""
+    if action not in _STATE_ACTIONS:
+        from ..core.errors import PermissionDenied
+
+        raise PermissionDenied(f"state.{action}")
+
+    handler = getattr(state, action)
+    if action in ("keys", "all", "clear"):
+        return handler()
+    return handler(**kwargs)
 
 
 def _response_from(data: dict[str, Any]) -> Response:

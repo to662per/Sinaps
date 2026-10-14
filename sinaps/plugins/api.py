@@ -49,14 +49,33 @@ import Skill` — то есть зависел от внутренностей. 
 * **Движки речи (`stt`, `tts`, `vad`).** Приватность проекта
   строится на том, что звук не покидает машину. Если дать плагину
   доступ к синтезу, ничто не помешает ему отправить текст в облако.
+
+Что приходит в обработчик
+-------------------------
+`DialogContext` с теми же полями, что и в ядре, плюс `ctx.state`.
+
+Плагин исполняется в дочернем процессе, поэтому `platform` и `session`
+через границу не переносятся: `platform` — это владение компьютером, а
+`session` не переживает сериализацию. Настоящий объект платформы
+плагину не достаётся никогда.
+
+`ctx.state` — своё именованное пространство плагина. Методы
+асинхронные, потому что хранилище лежит в ядре, а плагин — в другом
+процессе:
+
+    n = await ctx.state.get("счётчик", 0)
+    await ctx.state.set("счётчик", n + 1)
+    всё = await ctx.state.all()
+
+Без одобрения права `state` любой вызов бросает `PermissionDenied`.
 """
 
 from __future__ import annotations
 
 from ..core.context import DialogContext
 from ..core.errors import (DangerousActionDenied, InvalidSlot,
-                            NetworkDisabled, PluginError, SinapsError,
-                            SkillError, SkillNotFound)
+                            NetworkDisabled, PermissionDenied, PluginError,
+                            SinapsError, SkillError, SkillNotFound)
 from ..core.logging_setup import get_dialogue_logger
 from ..skills.base import IntentSpec, Response, Skill, SlotSpec
 from ..skills.registry import Match, SkillRegistry
@@ -85,6 +104,7 @@ __all__ = [
     "DangerousActionDenied",
     "PluginError",
     "NetworkDisabled",
+    "PermissionDenied",
     # --- прочее -----------------------------------------------------------
     "get_dialogue_logger",
 ]

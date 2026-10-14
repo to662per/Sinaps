@@ -1,4 +1,4 @@
-﻿"""Загрузчик плагинов: папка с манифестом превращается в команды.
+"""Загрузчик плагинов: папка с манифестом превращается в команды.
 
 Здесь плагины настоящие и живут в дочерних процессах — как и задумано.
 Заглушки не годились бы: главное свойство загрузчика в том, что **чужой
@@ -26,6 +26,7 @@ import pytest
 from sinaps.plugins import approvals
 from sinaps.plugins.loader import LoadReport, discover, load_all, load_plugin
 from sinaps.plugins.manifest import ManifestError
+from sinaps.plugins.state import PluginState
 from sinaps.skills.registry import SkillRegistry
 
 pytestmark = pytest.mark.filterwarnings("ignore::ResourceWarning")
@@ -81,7 +82,19 @@ def isolated_approvals(tmp_path, monkeypatch):
 
 
 def find(registry: SkillRegistry, name: str):
-    return next((s for s in registry.specs if s.name == name), None)
+    """Команда по имени.
+
+    Без перечисления доступных имён падение выглядело бы как
+    `NoneType has no attribute handler` — и пришлось бы гадать, что
+    не так: плагин не загрузился, команда называется иначе или её
+    съел конфликт имён.
+    """
+    spec = next((s for s in registry.specs if s.name == name), None)
+    if spec is None:
+        raise AssertionError(
+            f"нет команды «{name}»; зарегистрированы: "
+            f"{sorted(registry.spec_names())}")
+    return spec
 
 
 class FakeCtx:
@@ -617,6 +630,300 @@ async def test_plugin_loads_even_without_approval(tmp_path, registry):
         assert plugin.commands == ("netty.net.try",)
     finally:
         await plugin.stop()
+
+
+# --- состояние плагина через границу ---------------------------------------
+
+MEMO = """\
+    from sinaps.plugins.api import Response, Skill
+
+    async def bump(ctx, slots):
+        n = await ctx.state.get("count", 0) + 1
+        await ctx.state.set("count", n)
+        return Response(speech=f"счётчик {n}")
+
+    async def show(ctx, slots):
+        return Response(speech="всё: " + repr(await ctx.state.all()))
+
+    async def drop(ctx, slots):
+        await ctx.state.clear()
+        return Response(speech="стёрто")
+
+    async def poke(ctx, slots):
+        try:
+            await ctx.state.get("count")
+        except Exception as exc:
+            return Response(speech=f"отказ: {type(exc).__name__}")
+        return Response(speech="прошло")
+
+    async def store_junk(ctx, slots):
+        await ctx.state.set("мусор", object())
+        return Response(speech="записал")
+
+    def register(registry):
+        skill = Skill("memo")
+        skill.command("bump", bump, patterns=[r"^плюс$"])
+        skill.command("show", show, patterns=[r"^покажи$"])
+        skill.command("drop", drop, patterns=[r"^сброс$"])
+        skill.command("poke", poke, patterns=[r"^подгляди$"])
+        skill.command("junk", store_junk, patterns=[r"^мусор$"])
+        registry.add(skill)
+        return skill
+"""
+
+
+@pytest.fixture
+def state_dir(tmp_path, monkeypatch):
+    """База состояний — во временный каталог, боевая не трогается."""
+    import sinaps.plugins.state as state_mod
+
+    target = tmp_path / "plugins.db"
+    monkeypatch.setattr(state_mod, "default_path", lambda: target)
+    return target
+
+
+def memo_plugin(root, name="memo"):
+    """Плагин с состоянием в подпапке — `discover` ищет папки, не файлы."""
+    return make_plugin(root / name, name, body=MEMO, permissions="  - state")
+
+
+async def test_state_works_with_approval(tmp_path, registry, state_dir):
+    approvals.grant("memo", ("state",))
+    memo_plugin(tmp_path)
+
+    report = await load_all(tmp_path, registry)
+    try:
+        assert report.loaded[0].granted == ("state",)
+        spec = find(registry, "memo.bump")
+        first = await spec.handler(FakeCtx(), {})
+        second = await spec.handler(FakeCtx(), {})
+
+        assert first.speech == "счётчик 1"
+        assert second.speech == "счётчик 2"
+    finally:
+        await report.stop_all()
+
+
+async def test_state_refused_without_approval(tmp_path, registry, state_dir):
+    """Нет одобрения — плагин грузится, а состояние отказывает."""
+    memo_plugin(tmp_path)
+
+    report = await load_all(tmp_path, registry)
+    try:
+        plugin = report.loaded[0]
+        assert plugin.granted == ()
+        assert plugin.withheld == ("state",)
+        assert plugin.commands, "плагин должен загрузиться и без одобрения"
+
+        response = await find(registry, "memo.poke").handler(FakeCtx(), {})
+        assert response.speech == "отказ: PermissionDenied"
+    finally:
+        await report.stop_all()
+
+
+async def test_refused_plugin_writes_nothing(tmp_path, registry, state_dir):
+    """Отказ означает «не выполнено», а не «выполнено, но не покажем».
+
+    Проверка права стоит до похода в базу. Если бы она стояла после,
+    плагин продолжал бы писать в чужое пространство, просто не
+    получая ответа — и проверка на глаз ничего бы не показала.
+    """
+    body = textwrap.dedent("""\
+        from sinaps.plugins.api import Response, Skill
+
+
+        async def handle(ctx, slots):
+            await ctx.state.set("взлом", "данные")
+            return Response(speech="записал")
+
+
+        def register(registry):
+            skill = Skill("memo")
+            skill.command("bump", handle, patterns=[r"^плюс$"])
+            registry.add(skill)
+            return skill
+        """)
+    make_plugin(tmp_path / "memo", "memo", body=body,
+                permissions="  - state")
+
+    report = await load_all(tmp_path, registry)
+    try:
+        with pytest.raises(Exception):
+            await find(registry, "memo.bump").handler(FakeCtx(), {})
+
+        assert not state_dir.exists() or PluginState(
+            state_dir, plugin="memo").keys() == [], (
+            "отказ в правах не помешал записи в базу")
+    finally:
+        await report.stop_all()
+
+
+async def test_state_survives_process_restart(tmp_path, registry, state_dir):
+    """Данные плагина не пропали, потому что процесс перезапустился."""
+    approvals.grant("memo", ("state",))
+    memo_plugin(tmp_path)
+
+    first = await load_all(tmp_path, registry)
+    await find(registry, "memo.bump").handler(FakeCtx(), {})
+    await first.stop_all()
+
+    second = SkillRegistry()
+    report = await load_all(tmp_path, second)
+    try:
+        shown = await find(second, "memo.show").handler(FakeCtx(), {})
+        assert "'count': 1" in shown.speech, (
+            f"состояние не пережило перезапуск: {shown.speech}"
+        )
+    finally:
+        await report.stop_all()
+
+
+async def test_plugin_does_not_see_another_plugin_state(tmp_path,
+                                                        registry,
+                                                        state_dir):
+    """Пространства имён раздельные — ради этого и отдельная таблица."""
+    approvals.grant("memo", ("state",))
+    approvals.grant("other", ("state",))
+    memo_plugin(tmp_path, "memo")
+    memo_plugin(tmp_path, "other")
+
+    report = await load_all(tmp_path, registry)
+    try:
+        await find(registry, "memo.bump").handler(FakeCtx(), {})
+
+        shown = await find(registry, "other.memo.show").handler(FakeCtx(), {})
+
+        assert shown.speech == "всё: {}", (
+            f"чужой плагин увидел данные соседа: {shown.speech}"
+        )
+    finally:
+        await report.stop_all()
+
+
+async def test_clear_removes_only_own_state(tmp_path, registry, state_dir):
+    approvals.grant("memo", ("state",))
+    approvals.grant("other", ("state",))
+    memo_plugin(tmp_path, "memo")
+    memo_plugin(tmp_path, "other")
+
+    report = await load_all(tmp_path, registry)
+    try:
+        await find(registry, "memo.bump").handler(FakeCtx(), {})
+        await find(registry, "other.memo.bump").handler(FakeCtx(), {})
+        await find(registry, "memo.drop").handler(FakeCtx(), {})
+
+        shown_other = await find(registry, "other.memo.show").handler(FakeCtx(), {})
+        shown_memo = await find(registry, "memo.show").handler(FakeCtx(), {})
+
+        assert "'count': 1" in shown_other.speech, (
+            f"чужое состояние стёрли: {shown_other.speech}"
+        )
+        assert shown_memo.speech == "всё: {}", (
+            f"своё состояние не стёрли: {shown_memo.speech}"
+        )
+    finally:
+        await report.stop_all()
+
+
+async def test_unserialisable_value_reaches_the_plugin_as_an_error(
+        tmp_path, registry, state_dir):
+    """Мусор падает в плагине с объяснением, а не теряется молча."""
+    approvals.grant("memo", ("state",))
+    memo_plugin(tmp_path)
+
+    report = await load_all(tmp_path, registry)
+    try:
+        with pytest.raises(Exception) as info:
+            await find(registry, "memo.junk").handler(FakeCtx(), {})
+
+        assert "Допустимы только" in str(info.value)
+    finally:
+        await report.stop_all()
+
+
+async def test_state_is_rejected_for_ungranted_capability(tmp_path,
+                                                          registry,
+                                                          state_dir):
+    """Плагин не может позвать чужую возможность, даже назвав её вручную.
+
+    Право проверяется по имени возможности, а не по тому, каким
+    свойством плагин позвал. Кадр можно составить руками — и раньше
+    такая попытка проходила мимо, потому что смотрели только на
+    `ctx.state`.
+    """
+    approvals.grant("memo", ("state",))
+    body = textwrap.dedent("""\
+        import sys
+
+        from sinaps.plugins.api import PluginError, Response, Skill
+
+
+        async def handle(ctx, slots):
+            from sinaps.plugins.protocol import read_message, write_message
+
+            write_message(sys.stdout.buffer,
+                          {"op": "cap", "cap": "files",
+                           "action": "read", "kwargs": {"path": "секрет"}})
+            message = read_message(sys.stdin.buffer)
+            if message.get("op") == "cap_fail":
+                raise PluginError(message.get("message", "отказ"))
+            return Response(speech="прочитал секрет")
+
+
+        def register(registry):
+            skill = Skill("memo")
+            skill.command("bump", handle, patterns=[r"^плюс$"])
+            registry.add(skill)
+            return skill
+        """)
+    make_plugin(tmp_path / "memo", "memo", body=body, permissions="  - state")
+
+    report = await load_all(tmp_path, registry)
+    try:
+        with pytest.raises(Exception) as info:
+            await find(registry, "memo.bump").handler(FakeCtx(), {})
+
+        assert "одобрения" in str(info.value) or "files" in str(info.value)
+    finally:
+        await report.stop_all()
+
+async def test_context_still_has_dialog_fields_with_state(tmp_path,
+                                                          registry,
+                                                          state_dir):
+    """Появление `state` не должно сломать остальной контекст.
+
+    Обёртка `_PluginContext` подменяет `DialogContext`, и легко было бы
+    потерять при этом половину полей. Тест проходит по тем, что плагин
+    действительно использует.
+    """
+    approvals.grant("memo", ("state",))
+    body = textwrap.dedent("""\
+        from sinaps.plugins.api import Response, Skill
+
+
+        async def handle(ctx, slots):
+            n = await ctx.state.get("count", 0) + 1
+            await ctx.state.set("count", n)
+            return Response(
+                speech=f"{ctx.text}|{ctx.user_name}|{ctx.source}|{n}")
+
+
+        def register(registry):
+            skill = Skill("memo")
+            skill.command("bump", handle, patterns=[r"^плюс$"])
+            registry.add(skill)
+            return skill
+        """)
+    make_plugin(tmp_path / "memo", "memo", body=body, permissions="  - state")
+
+    report = await load_all(tmp_path, registry)
+    try:
+        response = await find(registry, "memo.bump").handler(
+            FakeCtx("привет", user_name="Шкипер", source="text"), {})
+
+        assert response.speech == "привет|Шкипер|text|1"
+    finally:
+        await report.stop_all()
 
 
 # --- отчёт и уборка ---------------------------------------------------------

@@ -134,18 +134,111 @@ def _describe_registry(registry) -> list[dict[str, Any]]:
     return described
 
 
-def _make_context(data: dict[str, Any]):
+class _StateProxy:
+    """Состояние плагина, как его видит автор.
+
+    Объекта `PluginState` в ребёнке нет и быть не может: база лежит в
+    ядре, а плагин — в другом процессе. Здесь не хранилище, а вопросы
+    к нему: каждый вызов уходит кадром и ждёт ответа.
+
+    Чтение из `sys.stdin` блокирующее, и это сознательно. Ребёнок в
+    этот момент занят одним — выполняет обработчик одного плагина.
+    Ничего другого в его цикле событий нет, ждать некому, а поток ради
+    синхронного чтения означал бы лишнюю машинерию при единственном
+    писателе.
+    """
+
+    __slots__ = ()
+
+    def _ask(self, action: str, **kwargs) -> Any:
+        import sys
+
+        from ..core.errors import PermissionDenied, PluginError
+        from .protocol import CAP_STATE, OP_CAP, OP_CAP_FAIL, OP_CAP_OK
+        from .protocol import ProtocolError, read_message, write_message
+
+        try:
+            write_message(sys.stdout.buffer, {
+                "op": OP_CAP, "cap": CAP_STATE,
+                "action": action, "kwargs": kwargs})
+        except ProtocolError as exc:
+            # Значение не прошло сериализацию. Проверка на стороне ядра
+            # до этого момента не успевает отработать: кадр собирается
+            # здесь, и `json` спотыкается раньше. Без перехвата автор
+            # увидел бы английский `Object of type object is not JSON
+            # serializable` вместо объяснения, что сохранять можно.
+            raise PluginError(
+                f"Состояние: значение нельзя передать — {exc}",
+                speech="Плагину не удалось сохранить значение") from exc
+
+        message = read_message(sys.stdin.buffer)
+
+        if message.get("op") == OP_CAP_OK:
+            return message.get("value")
+
+        detail = message.get("message") or "плагин не получил ответ"
+        if message.get("type") == "PermissionDenied":
+            raise PermissionDenied(message.get("permission", "state"))
+        raise PluginError(detail, speech=message.get("speech") or detail)
+
+    async def get(self, key: str, default: Any = None) -> Any:
+        """Значение или `default`, если ключа нет."""
+        return self._ask("get", key=key, default=default)
+
+    async def set(self, key: str, value: Any) -> None:
+        """Записать значение."""
+        self._ask("set", key=key, value=value)
+        return None
+
+    async def delete(self, key: str) -> bool:
+        """Убрать ключ. `False` — его и не было."""
+        return bool(self._ask("delete", key=key))
+
+    async def keys(self) -> list[str]:
+        """Все ключи этого плагина."""
+        return list(self._ask("keys") or [])
+
+    async def all(self) -> dict[str, Any]:
+        """Всё состояние плагина целиком."""
+        return dict(self._ask("all") or {})
+
+    async def clear(self) -> int:
+        """Стереть всё состояние. Сколько ключей убрано."""
+        return int(self._ask("clear") or 0)
+
+
+class _PluginContext:
+    """Контекст диалога плюс `state`.
+
+    Отдельная обёртка, а не новое поле в `DialogContext`: контекст
+    принадлежит ядру, и добавлять в него поля ради одного плагина —
+    значит тащить плагинные понятия в слой, который о плагинах ничего
+    не знает.
+    """
+
+    __slots__ = ("_ctx", "state")
+
+    def __init__(self, ctx, state) -> None:
+        self._ctx = ctx
+        self.state = state
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._ctx, name)
+
+
+def _make_context(data: dict[str, Any], state=None):
     """Контекст диалога из пришедших данных.
 
-    `platform` и `session` не восстанавливаются намеренно — см.
-    модуль. Их отсутствие — часть контракта, а не недосмотр.
+    `platform` и `session` не восстанавливаются намеренно — см. модуль.
+    Их отсутствие — часть контракта, а не недосмотр.
     """
     from ..core.context import DialogContext
 
     payload = {key: data[key] for key in CTX_FIELDS if key in data}
     payload.setdefault("text", "")
     payload.setdefault("history", [])
-    return DialogContext(**payload)
+    ctx = DialogContext(**payload)
+    return ctx if state is None else _PluginContext(ctx, state)
 
 
 def _make_response(data: dict[str, Any]):
@@ -291,7 +384,7 @@ def main() -> int:
             continue
 
         try:
-            ctx = _make_context(message.get("ctx") or {})
+            ctx = _make_context(message.get("ctx") or {}, state=_StateProxy())
             slots = message.get("slots") or {}
             response = asyncio.run(handler(ctx, slots))
             _write({"op": OP_RESULT, "id": request_id,

@@ -47,11 +47,23 @@ HEADER_SIZE = _HEADER.size
 OP_HELLO = "hello"
 OP_CALL = "call"
 OP_STOP = "stop"
+#: Ответ на запрос возможности.
+OP_CAP_OK = "cap_ok"
+OP_CAP_FAIL = "cap_fail"
 
 #: Операции от плагина к ядру.
 OP_READY = "ready"
 OP_RESULT = "result"
 OP_FAILED = "failed"
+#: Запрос возможности: плагин зовёт то, что живёт в ядре.
+OP_CAP = "cap"
+
+#: Единственная возможность на этом этапе.
+#:
+#: Список короткий намеренно. Права объявлены десять, но исполнимо
+#: одно, и выдавать плагину все десять сразу — значит отдать всё,
+#: не проверив ни одну. Остальные девять ждут своих этапов.
+CAP_STATE = "state"
 
 
 class ProtocolError(Exception):
@@ -59,8 +71,21 @@ class ProtocolError(Exception):
 
 
 def encode(message: dict[str, Any]) -> bytes:
-    """Упаковать сообщение в кадр."""
-    payload = json.dumps(message, ensure_ascii=False).encode("utf-8")
+    """Упаковать сообщение в кадр.
+
+    Ошибка сериализации превращается в `ProtocolError`, а не в сырой
+    `TypeError` от `json`. Иначе автор плагина, положивший в состояние
+    объект, увидел бы английский `Object of type object is not JSON
+    serializable` — и не понял бы, что именно ему нельзя сохранять.
+    """
+    try:
+        payload = json.dumps(message, ensure_ascii=False).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ProtocolError(
+            f"сообщение не сериализуется: {exc}. Допустимы только строки, "
+            "числа, списки, словари, true/false/null"
+        ) from exc
+
     if len(payload) > MAX_FRAME_BYTES:
         raise ProtocolError(
             f"сообщение {len(payload)} байт, максимум {MAX_FRAME_BYTES}"
