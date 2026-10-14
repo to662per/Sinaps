@@ -162,17 +162,27 @@ def _short(value: object) -> str:
 
 
 async def cmd_setup(args: argparse.Namespace) -> int:
-    """Одноразовая установка моделей. Не требует работающего ассистента."""
-    from .setup import main as setup_main
+    """Одноразовая установка моделей.
 
-    argv: list[str] = []
-    if getattr(args, "check", False):
-        argv.append("--check")
-    if getattr(args, "model", None):
-        argv += ["--model", args.model]
-    if getattr(args, "yes", False):
-        argv.append("--yes")
-    return setup_main(argv)
+    Здесь — только объяснение. Раньше команда делала `from .setup import
+    main`, то есть ядро импортировало единственную программу проекта,
+    которой сеть положена. Из-за этого проверка «в ядре нет сети» нуждалась
+    в исключении `sinaps.setup` — а исключение превращает запрет в
+    договорённость.
+
+    Установщик вынесен в `tools/install.py`: это отдельная программа,
+    запускается руками и завершается до старта ассистента. Теперь пакет
+    `sinaps` не содержит сетевого кода вообще, без исключений.
+
+    Команда оставлена, чтобы не ломать привычку и подсказку в README.
+    """
+    print("Установка моделей вынесена из ядра ассистента.\n")
+    print("Запусти:  setup_sinaps.bat")
+    print("или:      python tools\\install.py --yes")
+    print("\nПричина: установщику сеть положена, ядру — нет. Пока он был "
+          "модулем пакета,\nякорь мог достать его обычным импортом, и "
+          "запрет на сеть переставал\nбыть запретом.")
+    return 0
 
 
 async def cmd_selftest(_args: argparse.Namespace) -> int:
@@ -1017,16 +1027,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("run", help="обычный запуск (по умолчанию)")
     # --- установка (одноразовая) -----------------------------------------
-    p = sub.add_parser(
+    # Команда осталась как напоминание: сам установщик живёт в
+    # `tools/install.py` и ядром не импортируется.
+    sub.add_parser(
         "setup",
-        help="одноразовая установка: скачать модели и проверить звук")
-    p.add_argument("--check", action="store_true",
-                   help="только проверить, ничего не скачивая")
-    p.add_argument("--model", default=None,
-                   help="какую модель распознавания качать "
-                        "(по умолчанию — из config.yaml)")
-    p.add_argument("--yes", action="store_true",
-                   help="не спрашивать подтверждение перед скачиванием")
+        help="подсказка: установка вынесена в tools/install.py")
 
     sub.add_parser("selftest", help="проверка окружения без микрофона")
     sub.add_parser("devices", help="список аудиоустройств")

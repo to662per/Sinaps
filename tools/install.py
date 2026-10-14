@@ -1,5 +1,24 @@
 """Одноразовая установка: всё, чего нет в git.
 
+Почему файл лежит здесь, а не в пакете `sinaps`
+-----------------------------------------------
+Установщик — единственная программа проекта, которой сеть положена:
+он качает модели и библиотеки. Пока он был модулем пакета, ядро могло
+достать его обычным импортом, и проверка «в ядре нет сети» требовала
+исключения в виде `NETWORK_ALLOWLIST`. Исключение — это дыра по
+определению: сегодня им пользуется установщик, завтра им воспользуется
+что-нибудь ещё, и запрет перестанет быть запретом.
+
+Поэтому граница проходит по файловой системе, а не по договорённости:
+
+* ядро — пакет `sinaps/`. Сетевых импортов в нём нет вообще, без
+  исключений, и это проверяется тестом;
+* установщик — `tools/install.py`. Отдельная программа, которую
+  человек запускает руками и которая завершается до того, как
+  начнёт работу ассистент.
+
+Запуск: `python tools\\install.py` или `setup_sinaps.bat`.
+
 Зачем этот модуль
 -----------------
 В репозиторий не попадают ни модели, ни зависимости: они весят больше
@@ -42,7 +61,14 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .core.config import PROJECT_ROOT
+#: Установщик запускают до того, как пакет установлен, поэтому корень
+#: репозитория добавляем в путь сами. Иначе первый запуск на чистой
+#: машине упал бы с ModuleNotFoundError на самом старте.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from sinaps.core.config import PROJECT_ROOT
 
 #: Куда кладутся веса faster-whisper. Тот же путь, что в
 #: `stt/faster_whisper.py`; дублировать его нельзя.
@@ -477,7 +503,7 @@ def _wrap(text: str, width: int) -> list[str]:
 def run(*, install_missing: bool = True, stt_model: str | None = None,
         log=print) -> tuple[int, Report]:
     """Полный сценарий установки. Возвращает (код возврата, отчёт)."""
-    from .core.config import load_config
+    from sinaps.core.config import load_config
 
     if stt_model is None:
         try:
@@ -563,11 +589,11 @@ BANNER_SETUP = r"""
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Точка входа CLI: `python -m sinaps setup`."""
+    """Точка входа CLI: `python tools\\install.py`."""
     import argparse
 
     parser = argparse.ArgumentParser(
-        prog="python -m sinaps setup",
+        prog="tools/install.py",
         description="Одноразовая установка моделей и проверка звука.")
     parser.add_argument("--check", action="store_true",
                         help="только проверить, ничего не скачивая")
@@ -590,3 +616,12 @@ def main(argv: list[str] | None = None) -> int:
 
     code, _ = run(install_missing=not args.check, stt_model=args.model)
     return code
+
+
+if __name__ == "__main__":
+    # Блока не было, пока файл жил в пакете: вход шёл через
+    # `python -m sinaps setup`, и запускал его `sinaps/__main__.py`.
+    # Теперь установщик запускается напрямую, и без этой строчки он
+    # молча завершался с кодом 0, не сделав ничего — самый неприятный
+    # вид поломки, потому что выглядит как успех.
+    raise SystemExit(main())

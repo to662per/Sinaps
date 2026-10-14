@@ -72,16 +72,18 @@ FORBIDDEN_NETWORK = {
     "smtplib", "poplib", "imaplib", "xmlrpc", "websockets", "websockets.sync",
 }
 
-#: Модули, которым сеть положена. Ядро их не импортирует.
+#: Модули, которым сеть положена.
 #:
-#: `setup.py` качает модели при установке — это отдельная программа,
-#: которую человек запускает руками, и во время работы ассистента она
-#: не участвует. `plugins/network.py` появится на этапе 5: это прокси,
-#: который отдаёт сеть плагину по разрешению.
-NETWORK_ALLOWLIST = {
-    "sinaps.setup",
-    "sinaps.plugins.network",
-}
+#: Их больше нет. Установщик вынесен из пакета в `tools/install.py` —
+#: отдельная программа, которую человек запускает руками и которая
+#: завершается до старта ассистента. Пока он был модулем `sinaps.setup`,
+#: проверка нуждалась в исключении, а исключение превращает запрет в
+#: договорённость: сегодня им пользуется установщик, завтра чем-нибудь
+#: ещё, и запрет перестанет быть запретом.
+#:
+#: Плагины с разрешением `network.http` появятся на этапе 5 — это
+#: прокси `sinaps/plugins/network.py`, отдельный от ядра.
+#: Проверка ниже никого не исключает и не должна.
 
 #: Кто имеет право собирать граф зависимостей.
 WIRING_ALLOWLIST = {"runtime.py", "__main__.py"}
@@ -137,21 +139,91 @@ def _is_forbidden_network(name: str) -> bool:
 
 @pytest.mark.parametrize("path", _python_files(), ids=lambda p: p.name)
 def test_no_network_imports(path: Path):
-    """Требование проекта: строго локальная работа, без сети."""
-    module = _module_name(path)
-    if module in NETWORK_ALLOWLIST:
-        return
-
-    # Модуль с сетью по назначению — установщик моделей.
-
+    """Требование проекта: ядро строго локально, без сети и без исключений."""
     tree = ast.parse(path.read_text(encoding="utf-8"))
     for name in _imported_modules(tree):
         if name.startswith("."):
             continue
         assert not _is_forbidden_network(name), (
             f"{path.name}: запрещён сетевой импорт '{name}'. "
-            "Проект работает локально; для сетевого режима нужен явный флаг."
+            "Ядро работает локально; сеть есть только у установщика "
+            "(tools/install.py) и будущих плагинов."
         )
+
+
+def test_no_allowlist_for_network_imports():
+    """Исключение в проверке сети отменяет саму проверку.
+
+    Пока установщик жил в пакете, здесь стоял `NETWORK_ALLOWLIST` со
+    строкой `sinaps.setup`. Зелёный тест при этом означал «сеть
+    проходит, но её проверили и одобрили» — а раз одобрение можно
+    выдать ещё кому-нибудь, запрет перестаёт быть запретом.
+
+    Ищем присваивание через дерево, а не подстроку в тексте: первый
+    вариант проверки искал строку поиском и находил сам себя.
+    """
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+
+    assigned: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                assigned.add(target.id)
+            elif isinstance(target, ast.AnnAssign) and isinstance(
+                    target.target, ast.Name):
+                assigned.add(target.target.id)
+
+    # Ищем именно сетевые исключения. `WIRING_ALLOWLIST` — другое
+    # назначение (кто вправе собирать граф), и трогать его здесь
+    # незачем: проверка должна быть узкой, иначе её отключат целиком.
+    offenders = {name for name in assigned
+                 if "NETWORK" in name
+                 and ("ALLOWLIST" in name or "EXCEPTION" in name
+                      or "SKIP" in name)}
+
+    assert not offenders, (
+        f"в модуле появились сетевые исключения: {sorted(offenders)}. "
+        "Сеть в ядре запрещена безусловно."
+    )
+
+
+def test_installer_is_outside_the_package():
+    """Установщик обязан лежать вне `sinaps/`.
+
+    Это не стилистика. Пока он был модулем пакета, ядро доставало его
+    обычным импортом — то есть запрет на сеть держался на том, что
+    никто не напишет такую строку. Граница проходит по файловой
+    системе, а не по договорённости.
+    """
+    assert not (PACKAGE / "setup.py").exists(), (
+        "установщик вернулся в пакет sinaps: ядро снова сможет "
+        "достать его обычным импортом"
+    )
+
+    installer = PACKAGE.parent / "tools" / "install.py"
+    assert installer.exists(), "нет tools/install.py"
+    assert "sinaps" not in installer.parent.relative_to(PACKAGE.parent).parts[0], (
+        "установщик должен лежать вне пакета sinaps"
+    )
+
+
+def test_core_cannot_import_the_installer():
+    """Ядро не должно даже упоминать путь к установщику как импорт."""
+    for path in _python_files():
+        source = path.read_text(encoding="utf-8")
+        for node in ast.walk(ast.parse(source)):
+            names: list[str] = []
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [node.module or ""]
+            for name in names:
+                assert "install" not in name.lower(), (
+                    f"{path.name}: импорт '{name}' — установщик не должен "
+                    "быть достижим из ядра"
+                )
 
 
 @pytest.mark.parametrize("module", [
@@ -195,10 +267,6 @@ def test_no_torch_hub_from_internet(path: Path):
     """
     source = path.read_text(encoding="utf-8")
     if "torch.hub" not in source:
-        return
-
-    # Установщику сеть положена: он качает модели.
-    if _module_name(path) in NETWORK_ALLOWLIST:
         return
 
     tree = ast.parse(source)

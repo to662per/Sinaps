@@ -135,11 +135,15 @@ rem --- 3. models and sound --------------------------------------------
 echo.
 echo [3/4] Checking models and sound. About 2 GB may be downloaded.
 echo.
-rem `setup --yes` ends with a verified summary of what is on disk, so a
-rem separate check run right after it would print the same table twice.
-rem It would also be the weaker check: it looks at files rather than
-rem actually loading the models.
-"%VENV_PY%" -m sinaps setup --yes
+rem `tools\install.py --yes` ends with a verified summary of what is on
+rem disk, so a separate check run right after it would print the same
+rem table twice. It would also be the weaker check: it looks at files
+rem rather than actually loading the models.
+rem
+rem The installer lives outside the package on purpose: it is the only
+rem program allowed to use the network. Keeping it in `sinaps\` meant
+rem the core could reach it with a plain import.
+"%VENV_PY%" "tools\install.py" --yes
 set "RC=%ERRORLEVEL%"
 if not "%RC%"=="0" goto :setupwarn
 

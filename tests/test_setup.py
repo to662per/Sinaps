@@ -20,7 +20,28 @@ import os
 
 import pytest
 
-from sinaps import setup as S
+#: Установщик живёт вне пакета `sinaps`: это единственная программа
+#: проекта, которой сеть положена. Пока он был модулем пакета, ядро могло
+#: достать его обычным импортом, и проверка «в ядре нет сети» нуждалась
+#: в исключении — а исключение отменяет проверку.
+import importlib.util
+import sys
+from pathlib import Path
+
+_INSTALLER = Path(__file__).resolve().parent.parent / "tools" / "install.py"
+
+
+def _load_installer():
+    """Загрузить установщик как модуль по пути к файлу."""
+    spec = importlib.util.spec_from_file_location("sinaps_installer", _INSTALLER)
+    assert spec and spec.loader, "не удалось открыть tools/install.py"
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+S = _load_installer()
 
 
 # --- размеры ----------------------------------------------------------------
@@ -352,7 +373,7 @@ def test_default_mode_installs():
         called.update(kwargs)
         return 0, S.Report()
 
-    import sinaps.setup as module
+    module = S
     original = module.run
     module.run = fake_run
     try:

@@ -118,10 +118,17 @@ setup_sinaps.bat
 Докачать недостающее или просто проверить:
 
 ```powershell
-.\.venv\Scripts\python -m sinaps setup           # докачать
-.\.venv\Scripts\python -m sinaps setup --check   # проверить, ничего не качая
-.\.venv\Scripts\python -m sinaps setup --model small   # взять модель поменьше
+.\.venv\Scripts\python tools\install.py           # докачать
+.\.venv\Scripts\python tools\install.py --check   # проверить, ничего не качая
+.\.venv\Scripts\python tools\install.py --model small   # взять модель поменьше
 ```
+
+> **Почему установщик лежит в `tools/`, а не в пакете `sinaps`:**
+> он единственный, кому сеть положена. Пока он был модулем пакета, ядро
+> доставало его обычным импортом, и проверка «в ядре нет сети» нуждалась
+> в исключении — а исключение отменяет проверку. Теперь граница проходит
+> по файловой системе: `sinaps/` без сети безусловно, `tools/install.py`
+> запускается руками и завершается до старта ассистента.
 
 ### Если нужна модель поменьше
 
