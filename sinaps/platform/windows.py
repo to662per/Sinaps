@@ -1294,35 +1294,104 @@ def _user_roots() -> list[Path]:
 
 
 def _score_against(name: str, wanted: set[str]) -> float:
+    """Насколько имя файла похоже на сказанное.
+
+    Почему не только `SequenceMatcher`
+    -------------------------------
+    Замер на этой машине: запрос «sinaps.log» получал подсказку
+    `sips.pm` с оценкой 0.80 — выше порога. Причина в том, что
+    `SequenceMatcher` мерит долю совпавших символов, а длина в знаменателе
+    мала: «sinaps» и «sips» — по 5–6 букв, общее начало ноль, совпали
+    четыре буквы, и 4/6 выглядит как «очень похоже». Это шум, а не
+    совпадение: человек услышал бы «sips.pm» и решил бы, что поиск
+    сошёл с ума.
+
+    Поэтому добавляем требование общего начала. Настоящая опечатка
+    («отчет» против «Отчёт») начинается одинаково либо отличается
+    одной-двумя буквами внутри, а неслучайное имя — нет.
+
+    Возвращаемое число остаётся оценкой `SequenceMatcher`, чтобы порог
+    в 0.72 продолжал означать то же, что раньше.
+    """
     import difflib
 
     forms = _path_forms(name)
     if not forms:
         return 0.0
-    return max(difflib.SequenceMatcher(None, w, f).ratio()
-               for w in wanted for f in forms)
+
+    best = 0.0
+    for wanted_form in wanted:
+        for form in forms:
+            if not wanted_form or not form:
+                continue
+            ratio = difflib.SequenceMatcher(None, wanted_form, form).ratio()
+            # Считаем только пары с общим началом. Точное совпадение
+            # проходит проверку, близкая опечатка — почти всегда тоже
+            # (описка обычно в середине: «отчет»/«отчёт», «звонок»/
+            # «звонки»), а вот «sips» против «sinaps» отсеивается.
+            if not _shares_start(wanted_form, form):
+                continue
+            best = max(best, ratio)
+    return best
+
+
+def _shares_start(left: str, right: str) -> bool:
+    """Есть ли у двух имён общее начало достаточно длинное, чтобы
+    совпадение не было случайным.
+
+    Требуем три общие буквы либо совпадение целого более короткого
+    имени. Один-два общих символа ничего не доказывают: «log» и
+    «lov» начинаются одинаково и при этом ничего общего не имеют.
+    """
+    if left == right:
+        return True
+
+    shorter, longer = sorted((left, right), key=len)
+    if len(shorter) >= 3 and shorter in longer:
+        return True
+
+    common = 0
+    for a, b in zip(left, right):
+        if a != b:
+            break
+        common += 1
+    return common >= 3
 
 
 def suggest_paths(query: str, *, limit: int = 3) -> list[str]:
-    """Похожие файлы и папки — для ответа «не нашёл, может быть…»."""
+    """Похожие файлы и папки — для ответа «не нашёл, может быть…».
+
+    Имена собираются в словарь: раньше один и тот же файл попадал в
+    список дважды, потому что проверялись и имя целиком, и форма без
+    расширения, и оба попадали в один результат. Человек слышал
+    «mvp-sinaps.json, mvp-sinaps.json» и не понимал, это два файла или
+    повтор.
+    """
     wanted = _path_forms(query)
     if not wanted:
         return []
 
-    scored: list[tuple[float, str]] = []
+    best: dict[str, tuple[float, str]] = {}
     for root in _user_roots():
         if not root.exists():
             continue
         try:
             for found in root.rglob("*"):
                 score = _score_against(found.name, wanted)
-                if score >= PATH_SUGGEST_SCORE:
-                    scored.append((score, found.name))
+                if score < PATH_SUGGEST_SCORE:
+                    continue
+                # Ключ свёрнутый — чтобы «AikoMate.url» и «aikomate.url»
+                # не стали двумя подсказками. А значение хранит имя как
+                # есть: человеку нужно то, что он увидит в проводнике,
+                # а не то, что услышит.
+                key = found.name.lower()
+                if score > best.get(key, (0.0, ""))[0]:
+                    best[key] = (score, found.name)
         except OSError:
             continue
 
-    scored.sort(key=lambda pair: pair[0], reverse=True)
-    return [name for _score, name in scored[:limit]]
+    ordered = sorted(best.items(), key=lambda pair: (-pair[1][0], pair[0]))
+    return [name for _key, (_score, name) in ordered[:limit]]
 
 
 def _expand_windows_path(raw: str) -> str | None:

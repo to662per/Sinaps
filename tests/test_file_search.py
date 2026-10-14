@@ -136,6 +136,83 @@ def test_suggest_respects_limit(profile):
     assert len(W.suggest_paths("смет", limit=3)) <= 3  # noqa: SLF001
 
 
+# --- случайные совпадения на коротких именах --------------------------------
+
+
+@pytest.mark.parametrize("name", ["sips.pm", "icaps.pm", "sipsx", "ips.pm"])
+def test_short_unrelated_name_is_not_suggested(profile, name):
+    """Замер на машине пользователя: «sinaps.log» получал подсказку
+    «sips.pm» с оценкой 0,80 — выше порога.
+
+    `SequenceMatcher` мерит долю совпавших символов, а длина в
+    знаменателе мала: «sinaps» и «sips» — по 5–6 букв, совпали четыре,
+    и 4/6 выглядит как «очень похоже». Общего начала здесь ноль, то
+    есть совпадение случайное, а человек услышал бы чужое имя и
+    решил бы, что поиск сошёл с ума.
+
+    Имена с настоящим общим началом сюда не входят: «sinda» и «sinaps»
+    действительно начинаются одинаково, и предлагать их можно.
+    """
+    (profile / "Downloads" / name).write_text("x")
+    (profile / "Downloads" / "sinaps.log").write_text("x")
+
+    assert name not in W.suggest_paths("sinaps.log")     # noqa: SLF001
+
+
+def test_real_typo_still_suggested(profile):
+    """Проверка на строгость: настоящая опечатка проходит."""
+    (profile / "Downloads" / "sinaps.log").write_text("x")
+
+    assert "sinaps.log" in W.suggest_paths("sinap")      # noqa: SLF001
+
+
+def test_no_common_start_gives_zero(profile):
+    wanted = W._path_forms("sinaps")                     # noqa: SLF001
+
+    assert W._score_against("sips.pm", wanted) == 0.0   # noqa: SLF001
+    assert W._score_against("sinaps", wanted) == 1.0     # noqa: SLF001
+
+
+@pytest.mark.parametrize("left,right,expected", [
+    ("sinaps", "sips", False),      # общего начала нет
+    ("sinaps", "sinaps", True),     # точное совпадение
+    ("отчет", "отчёт", True),       # отличается одна буква
+    ("log", "lov", False),          # три буквы общего начала мало
+    ("report", "rebus", False),
+])
+def test_shares_start_rule(left, right, expected):
+    assert W._shares_start(left, right) is expected       # noqa: SLF001
+
+
+# --- подсказки не повторяются и стабильны -----------------------------------
+
+
+def test_suggest_has_no_duplicates(profile):
+    """Раньше один файл попадал в список дважды: проверялись и имя
+    целиком, и форма без расширения, и оба проходили порог."""
+    (profile / "Downloads" / "mvp-sinaps.json").write_text("x")
+
+    got = W.suggest_paths("mvp-sinaps.json")             # noqa: SLF001
+    assert len(got) == len(set(got))
+    assert got.count("mvp-sinaps.json") == 1
+
+
+def test_suggest_keeps_original_spelling(profile):
+    """Человек должен услышать имя как в проводнике, а не свёрнутое."""
+    (profile / "Downloads" / "AikoMate.url").write_text("x")
+
+    assert W.suggest_paths("aikomate") == ["AikoMate.url"]  # noqa: SLF001
+
+
+def test_suggest_order_is_stable(profile):
+    """Порядок не должен зависеть от того, как файлы легли на диск."""
+    for name in ("sinaps-one.log", "sinaps-two.log", "sinaps-three.log"):
+        (profile / "Downloads" / name).write_text("x")
+
+    runs = [W.suggest_paths("sinaps.log", limit=3) for _ in range(3)]  # noqa: SLF001
+    assert runs[0] == runs[1] == runs[2]
+
+
 # --- ничего лишнего не открывается ------------------------------------------
 
 

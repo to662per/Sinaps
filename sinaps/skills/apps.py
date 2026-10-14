@@ -10,11 +10,14 @@ def register() -> Skill:
     skill = Skill("apps", description="Программы и файлы")
 
     def _not_found(what: str, query: str) -> str:
-        """Ответ «не нашёл» с подсказками — как у программ.
+        """Ответ «не нашёл» с вариантами и подсказкой к следующему шагу.
 
         Раньше файлы и папки отвечали голым «Не нашёл», хотя рядом был
         «Отчёт2026.pdf», а человек сказал «отчет». Программы в том же
         случае предлагали варианты, и разница выглядела случайной.
+
+        Варианты перечисляются, чтобы человек мог сказать нужное имя
+        следующим шагом, а не догадываться, где ошибся.
         """
         try:
             from ..platform.windows import suggest_paths
@@ -23,11 +26,12 @@ def register() -> Skill:
         except Exception:                             # noqa: BLE001
             similar = []
 
-        if similar:
-            names = ", ".join(similar)
-            return (f"Не нашёл {what} «{query}». Похожее: {names}. "
-                    f"Скажи точнее.")
-        return f"Не нашёл {what} «{query}»"
+        if not similar:
+            return f"Не нашёл {what} «{query}»"
+
+        names = ", ".join(similar)
+        return (f"Не нашёл {what} «{query}». Похожее: {names}. "
+                f"Скажи «открыть {similar[0]}».")
 
     async def open_app(ctx, slots):  # noqa: ANN001
         query = slots["name"]
