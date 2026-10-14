@@ -137,11 +137,21 @@ class SkillRegistry:
         return None
 
     def has_missing_slots(self, match: Match) -> list[SlotSpec]:
-        """Обязательные слоты, которые не удалось заполнить."""
-        return [
-            slot for slot in match.spec.slots.values()
-            if slot.required and not match.slots.get(slot.name)
-        ]
+        """Обязательные слоты, которые не удалось заполнить.
+
+        Проверка именно на `None`, а не на «ложь». Раньше здесь стояло
+        `not match.slots.get(...)`, и ноль считался пустым: «поставь
+        громкость на 0» доходило до навыка с правильным числом и
+        отвечало «нужно percent». Ноль — полноценное значение,
+        в том числе для громкости.
+        """
+        missing = []
+        for slot in match.spec.slots.values():
+            if not slot.required:
+                continue
+            if match.slots.get(slot.name) is None:
+                missing.append(slot)
+        return missing
 
     def _slots_from_original(self, spec: IntentSpec, original: str) -> dict[str, str]:
         """Извлекает слоты из текста «как сказал пользователь».

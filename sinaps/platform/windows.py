@@ -480,6 +480,30 @@ class WindowsPlatform:
         key = VK_VOLUME_UP if up else VK_VOLUME_DOWN
         return self._volume_key(key, times)
 
+    def volume_set(self, percent: int) -> bool:
+        """Поставить ровно столько процентов.
+
+        Не через сдвиг клавишей: чтобы попасть из 80 в 50, пришлось бы
+        нажать 15 раз, и результат зависел бы от того, где был уровень
+        в момент команды. Точное значение — это то, что человек и
+        просит, когда говорит «поставь громкость на пятьдесят».
+        """
+        current = _audio.read()
+        if current is None:
+            # COM недоступен — сдвигом и не угадаешь. Честнее отказ,
+            # чем поставить наугад.
+            return False
+
+        _level, muted = current
+        target = max(0, min(100, int(percent)))
+        if not _audio.set_percent(target):
+            return False
+        # Снять приглушение: иначе уровень выставится, а звука не будет.
+        # Человек услышал бы «поставил», а в комнате тишина.
+        if muted:
+            _audio.set_muted(False)
+        return True
+
     def volume_mute(self) -> bool:
         if user32 is None:
             return False

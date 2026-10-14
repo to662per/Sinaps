@@ -207,3 +207,71 @@ def test_protected_processes_are_not_killed():
 def test_kill_without_target_does_nothing():
     assert _kill_process("") == 0
     assert _kill_process("   ") == 0
+
+
+# --- обязательные слоты: ноль это значение, а не пробел ---------------------
+
+
+def test_zero_in_required_slot_is_not_missing():
+    """Ноль не должен считаться незаполненным слотом.
+
+    Правка в `has_missing_slots` затрагивает все команды с обязательными
+    слотами, поэтому проверяем её напрямую, а не через громкость.
+    """
+    from sinaps.skills.base import SlotSpec
+    from sinaps.skills.registry import Match, SkillRegistry
+
+    spec = _spec_with_slot("percent", "number", required=True)
+    registry = SkillRegistry()
+
+    empty = _match_with(spec, {})
+    zero = _match_with(spec, {"percent": 0.0})
+
+    assert registry.has_missing_slots(empty), "пустой слот — отсутствует"
+    assert not registry.has_missing_slots(zero), (
+        "ноль — это значение, а не «слот не заполнен»"
+    )
+
+
+def test_optional_slot_zero_is_never_missing():
+    from sinaps.skills.registry import SkillRegistry
+
+    spec = _spec_with_slot("percent", "number", required=False)
+    registry = SkillRegistry()
+
+    assert not registry.has_missing_slots(_match_with(spec, {}))
+
+
+def test_false_in_required_slot_is_a_value_too():
+    """Тот же класс ошибки, но с логическим значением."""
+    from sinaps.skills.registry import SkillRegistry
+
+    spec = _spec_with_slot("flag", "bool", required=True)
+    registry = SkillRegistry()
+
+    assert not registry.has_missing_slots(
+        _match_with(spec, {"flag": False})), (
+        "False — значение, а не «слот не заполнен»")
+
+
+def _spec_with_slot(name: str, kind: str, *, required: bool):
+    """Настоящий IntentSpec с одним слотом."""
+    from sinaps.skills.base import IntentSpec, SlotSpec
+
+    async def handler(ctx, slots):  # noqa: ANN001
+        return None
+
+    spec = IntentSpec(
+        name="тест",
+        patterns=[r"^проверка$"],
+        handler=handler,
+        slots={name: SlotSpec(name, kind, required=required)},
+    )
+    return spec
+
+
+def _match_with(spec, slots):
+    """Match с заданными слотами — без прогона распознавания."""
+    from sinaps.skills.registry import Match
+
+    return Match(spec=spec, raw_slots={}, slots=slots)

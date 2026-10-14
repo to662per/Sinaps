@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ..nlu.slots import _plural
 from ..nlu.verbs import verb, verb_with
 from ..skills.base import Response, Skill, SlotSpec
 
@@ -50,6 +51,35 @@ def register() -> Skill:
             return Response(speech=f"Звук выключен, громкость {state.percent} процентов")
         return Response(speech=f"Громкость {state.percent} процентов")
 
+    async def volume_set(ctx, slots):  # noqa: ANN001
+        """Поставить громкость на указанное число.
+
+        Отдельная команда, а не сдвиг: «сделай громкость на 50» из
+        текущих 80 не получить нажатиями — пришлось бы угадывать,
+        сколько раз нажать, и результат зависел бы от того, где
+        громкость стояла в момент команды.
+        """
+        try:
+            percent = int(float(slots["percent"]))
+        except (KeyError, TypeError, ValueError):
+            return Response(speech="Скажи, на сколько процентов")
+
+        if percent < 0 or percent > 100:
+            return Response(speech="Громкость от нуля до ста")
+
+        if not ctx.platform.volume_set(percent):
+            return Response(speech="Не могу поставить громкость точно")
+
+        after = _level(ctx)
+        change = _plural(percent, "процент", "процента", "процентов")
+        if after is None:
+            return Response(speech=f"Поставил {change}")
+        if after == percent:
+            return Response(speech=f"Поставил {change}")
+        # Край диапазона не трогаем, но и обещать точное число нельзя:
+        # система могла не выставить ровно.
+        return Response(speech=f"Поставил {change}. Сейчас {after} процентов")
+
     async def play_pause(ctx, slots):  # noqa: ANN001
         ok = ctx.platform.media_play_pause()
         return Response(speech="Переключаю воспроизведение" if ok
@@ -71,7 +101,12 @@ def register() -> Skill:
             rf"^(?:{verb_with('', 'сделать', 'увеличить', 'прибавить', 'добавить')} )?громче$",
             rf"^(?:{verb_with('', 'сделать', 'увеличить', 'прибавить', 'добавить')} )?громче\s+(?:на\s+)?(?P<percent>.+)$",
             # «прибавь громкость» — глагол и существительное в разном порядке
-            rf"^(?:{verb('прибавить', 'добавить', 'увеличить', 'сделать')})\s+громкость(?:\s+(?:на\s+)?(?P<percent>.+))?$",
+            #
+            # «сделать» здесь намеренно нет: «сделай громкость на 30»
+            # человеком означает «поставь 30», а не «увеличь на 30».
+            # Разница в одном слове, а разводится она только навыком
+            # `volume_set` — поэтому пересекаться им нельзя.
+            rf"^(?:{verb('прибавить', 'добавить', 'увеличить')})\s+громкость(?:\s+(?:на\s+)?(?P<percent>.+))?$",
             r"^громкость (?:повыше|больше|увеличить)$",
             r"^подними громкость$",
             r"^volume up$",
@@ -98,6 +133,34 @@ def register() -> Skill:
         slots={"percent": SlotSpec("percent", "number", required=False,
                                    default=_STEP, description="На сколько процентов")},
         description="Уменьшить громкость",
+        priority=10,
+    )
+
+    skill.command(
+        "volume_set",
+        volume_set,
+        patterns=[
+            # «поставь громкость на 50»
+            #
+            # Проценты ловим как `.+`, а не `\d+`: человек говорит
+            # «на пятьдесят» прописью так же естественно, как «на 50».
+            # Разбором строки в число занимается слот.
+            rf"^(?:{verb('сделать', 'поставить', 'выставить', 'установить', 'отрегулировать')})"
+            rf"\s+(?:уровень\s+)?(?:громкости|громкость|звука|звук)"
+            rf"(?:\s+(?:на\s+)?(?P<percent>.+))?$",
+            # «громкость на 50» и «громкость 50 процентов» — без глагола
+            rf"^(?:уровень\s+)?(?:громкости|громкость|звука|звук)"
+            rf"\s+(?:на\s+)?(?P<percent>.+?)"
+            r"(?:\s*процентов?|\s*%)?$",
+            r"^volume\s+(?P<percent>.+)$",
+            r"^set\s+volume\s+(?P<percent>.+)$",
+        ],
+        examples=["поставь громкость на 50", "сделай громкость 30",
+                  "выставь уровень звука на семьдесят",
+                  "установи громкость на 100", "громкость на 20 процентов"],
+        slots={"percent": SlotSpec("percent", "number", required=True,
+                                   description="На сколько процентов поставить")},
+        description="Поставить громкость на указанный процент",
         priority=10,
     )
 
@@ -204,8 +267,6 @@ def _shifted(ctx, word: str, before: int | None, percent: int, up: bool) -> str:
     изменения. Разница видна у края: «сделай громче на 30» при 90
     даёт не 120, а 100, и предсказание об этом не знает.
     """
-    from ..nlu.slots import _plural
-
     change = _plural(percent, "процент", "процента", "процентов")
     after = _level(ctx)
 

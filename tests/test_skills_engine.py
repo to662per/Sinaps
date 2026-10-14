@@ -118,6 +118,66 @@ async def test_volume_up_clamps_at_edge(engine, platform_stub):
     assert "100" in reply.speech
 
 
+@pytest.mark.parametrize("phrase,expected", [
+    ("поставь громкость на 50", 50),
+    ("поставь громкость на сто", 100),
+    ("сделай громкость 30", 30),
+    ("выставь громкость на семьдесят", 70),
+    ("установим громкость на 60", 60),
+    ("громкость на 35 процентов", 35),
+    ("громкость 40", 40),
+    ("поставь громкость на 0", 0),
+])
+async def test_volume_set_is_exact(engine, platform_stub, phrase, expected):
+    """«Поставь громкость на 50» — это ровно 50, а не «увеличь на 50».
+
+    Отдельная команда, потому что сдвигом это не сделать: из 80 в 50
+    пришлось бы угадывать число нажатий, и результат зависел бы от
+    того, где громкость стояла в момент команды.
+    """
+    platform_stub.volume_percent = 80
+
+    reply = await say(engine, phrase)
+
+    assert platform_stub.volume_percent == expected, (
+        f"{phrase!r} -> {platform_stub.volume_percent}, ждали {expected}"
+    )
+    assert "не понял" not in reply.speech.lower()
+
+
+async def test_volume_set_zero_is_not_treated_as_missing(engine, platform_stub):
+    """Ноль — полноценное значение, а не «слот не заполнен».
+
+    Раньше `has_missing_slots` проверял `not match.slots.get(...)`,
+    и ноль считался пустым: команда доходила до навыка с правильным
+    числом и отвечала «нужно percent».
+    """
+    reply = await say(engine, "поставь громкость на 0")
+
+    assert platform_stub.volume_percent == 0
+    assert "нужно" not in reply.speech.lower()
+
+
+async def test_volume_set_rejects_out_of_range(engine, platform_stub):
+    platform_stub.volume_percent = 50
+
+    reply = await say(engine, "поставь громкость на 150")
+
+    assert platform_stub.volume_percent == 50, "уровень не тронут"
+    assert "150" not in reply.speech
+
+
+async def test_volume_shift_and_set_do_not_mix(engine, platform_stub):
+    """«сделай громкость 30» ставит, «сделай громче на 20» сдвигает."""
+    await say(engine, "поставь громкость на 50")
+
+    await say(engine, "сделай громче на 20")
+    assert platform_stub.volume_percent == 70
+
+    await say(engine, "сделай громкость 30")
+    assert platform_stub.volume_percent == 30
+
+
 async def test_volume_level_reports_percent(engine, platform_stub):
     """Пункт «точная громкость»: навык з��ания уровня."""
     platform_stub.volume_percent = 37

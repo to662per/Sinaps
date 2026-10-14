@@ -56,6 +56,12 @@ class FakePlatform:
         self.volume_percent = max(0, self.volume_percent - percent)
         return True
 
+    def volume_set(self, percent: int) -> bool:
+        """Поставить ровно: из 80 в 50 — именно в 50, без угадывания."""
+        self.calls.append(f"volume_set:{percent}")
+        self.volume_percent = max(0, min(100, int(percent)))
+        return True
+
     def volume_mute(self) -> bool:
         self.calls.append("mute")
         return True
