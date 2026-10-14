@@ -661,6 +661,7 @@ async def cmd_listen(args: argparse.Namespace) -> int:
     runtime.bus.on(EventType.TTS_FINISHED)(_on_tts_done)
 
     try:
+        print("Запускаю модели — это может занять несколько секунд...")
         await runtime.start()
     except Exception as exc:
         print(f"FAIL: не удалось запустить: {exc}")
@@ -944,6 +945,7 @@ async def _run_interactive_locked(
         with_audio = False
 
     try:
+        print("Запускаю модели — это может занять несколько секунд...")
         await runtime.start()
     except Exception as exc:
         print(f"Не удалось запустить: {exc}")

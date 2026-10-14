@@ -71,6 +71,7 @@ class Runtime:
             #
             # Бонус: первая команда уходит сразу, а не платит за холодную
             # модель несколько секунд.
+            log.info("Прогреваю модели — это может занять несколько секунд...")
             await self.warmup_models()
             await self.listener.start()
             if self.trigger is not None:
