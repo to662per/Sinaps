@@ -11,4 +11,5 @@
 
 from __future__ import annotations
 
-__all__ = ["api", "loader", "manifest"]
+__all__ = ["api", "approvals", "loader", "manifest", "protocol", "runner",
+           "sandbox"]

@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 import pytest
@@ -92,15 +93,20 @@ FORBIDDEN_NETWORK = {
 
 #: Модули, которым сеть положена.
 #:
-#: Их больше нет. Установщик вынесен из пакета в `tools/install.py` —
+#: Их нет. Установщик вынесен из пакета в `tools/install.py` —
 #: отдельная программа, которую человек запускает руками и которая
 #: завершается до старта ассистента. Пока он был модулем `sinaps.setup`,
 #: проверка нуждалась в исключении, а исключение превращает запрет в
 #: договорённость: сегодня им пользуется установщик, завтра чем-нибудь
 #: ещё, и запрет перестанет быть запретом.
 #:
-#: Плагины с разрешением `network.http` появятся на этапе 5 — это
-#: прокси `sinaps/plugins/network.py`, отдельный от ядра.
+#: Сети не досталось и плагинам. Плагин с разрешением `network.http`
+#: исполняется в дочернем процессе, где сокеты закрыты на уровне
+#: импорта (`sinaps/plugins/sandbox.py`); без одобрения закрыты, с
+#: одобрением — открыты. Сам пакет `sinaps` при этом не знает ни одного
+#: сетевого импорта: закрытие делает перехватчик, который работает по
+#: именам, а не по `import`.
+#:
 #: Проверка ниже никого не исключает и не должна.
 
 #: Кто имеет право собирать граф зависимостей.
@@ -419,3 +425,92 @@ def test_private_is_local_only_by_default():
     from sinaps.core.config import SinapsConfig
 
     assert SinapsConfig().privacy.local_only is True
+
+
+# --- плагины ----------------------------------------------------------------
+
+#: Где лежат плагины: рядом с пакетом, а не внутри него.
+PLUGINS_DIR = PACKAGE.parent / "plugins"
+
+
+def _network_offenders(folder: Path) -> list[str]:
+    """Сетевые импорты в файлах папки плагина."""
+    found = []
+    for path in sorted(folder.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for name in _imported_modules(tree):
+            if not name.startswith(".") and _is_forbidden_network(name):
+                found.append(f"{path.name}: {name}")
+    return found
+
+
+def _declared_permissions(folder: Path) -> set[str]:
+    """Права из манифеста. Читается грубо — нам нужен сам факт."""
+    manifest = folder / "manifest.yaml"
+    if not manifest.exists():
+        return set()
+    return set(re.findall(r"^\s*-\s*(\S+)\s*$",
+                          manifest.read_text(encoding="utf-8"),
+                          re.MULTILINE))
+
+
+def test_plugin_without_network_permission_has_no_network_imports():
+    """Сеть в пагине — только вместе с разрешением `network.http`.
+
+    Именно это делает право исполнимым, а не декоративным. Плагин
+    лежит вне пакета, и верхняя проверка его не видит; без этой
+    проверки «никто не просил, но автор написал» прошло бы молча, и
+    человек увидел бы в списке разрешений одно, а вышел бы в сеть по
+    другой причине.
+    """
+    if not PLUGINS_DIR.exists():
+        return
+
+    for folder in PLUGINS_DIR.iterdir():
+        if not folder.is_dir() or not (folder / "manifest.yaml").exists():
+            continue
+        offenders = _network_offenders(folder)
+        if offenders:
+            assert "network.http" in _declared_permissions(folder), (
+                f"плагин {folder.name} импортирует сеть ({offenders}), "
+                "но не объявил разрешение network.http"
+            )
+
+
+def test_plugin_network_check_actually_catches(tmp_path):
+    """Проверка проверки: нарушитель должен быть пойман.
+
+    Без этого тест выше был бы зелёным просто потому, что папка
+    `plugins/` пуста, — и первым же плагином перестал бы что-то
+    защищать, никому не заметив.
+    """
+    plugin = tmp_path / "sneaky"
+    plugin.mkdir()
+    (plugin / "manifest.yaml").write_text(
+        "name: sneaky\npermissions:\n  - state\n", encoding="utf-8")
+    (plugin / "plugin.py").write_text(
+        "import urllib.request\n\ndef register(registry):\n    pass\n",
+        encoding="utf-8")
+
+    offenders = _network_offenders(plugin)
+
+    assert offenders, "проверка не ловит сетевой импорт в плагине"
+    assert "urllib.request" not in _declared_permissions(plugin), (
+        "плагин просил не то, что проверка ловит — тест вхолостую"
+    )
+
+
+def test_plugin_network_check_passes_approved_plugin(tmp_path):
+    """Обратная сторона: объявленное право должно проверку снимать."""
+    plugin = tmp_path / "weather"
+    plugin.mkdir()
+    (plugin / "manifest.yaml").write_text(
+        "name: weather\npermissions:\n  - network.http\n", encoding="utf-8")
+    (plugin / "plugin.py").write_text(
+        "import urllib.request\n\ndef register(registry):\n    pass\n",
+        encoding="utf-8")
+
+    assert "network.http" in _declared_permissions(plugin)
+    assert _network_offenders(plugin), "импорт всё равно должен быть виден"
