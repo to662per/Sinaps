@@ -440,7 +440,7 @@ def test_capabilities_speech_promises_the_panel(registry):
 
     from sinaps.core.bus import EventBus, EventType
     from sinaps.skills.engine import SkillEngine
-    from tests.conftest import FakePlatform
+    from sinaps.plugins.testing import FakePlatform
 
     bus = EventBus()
     engine = SkillEngine(registry=registry, bus=bus, platform=FakePlatform())
@@ -466,7 +466,7 @@ def test_capabilities_speech_does_not_mention_screen(registry):
     import asyncio
 
     from sinaps.skills.engine import SkillEngine
-    from tests.conftest import FakePlatform
+    from sinaps.plugins.testing import FakePlatform
 
     engine = SkillEngine(registry=registry, platform=FakePlatform())
 
@@ -483,7 +483,7 @@ def test_capabilities_speech_states_a_real_number(registry):
     import asyncio
 
     from sinaps.skills.engine import SkillEngine
-    from tests.conftest import FakePlatform
+    from sinaps.plugins.testing import FakePlatform
 
     engine = SkillEngine(registry=registry, platform=FakePlatform())
     data = P.build_cards(registry.specs)

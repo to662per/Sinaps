@@ -109,7 +109,7 @@ def test_greeting_text_is_synthesizable():
     from sinaps.core.bus import EventBus
     from sinaps.core.session import SessionController
     from sinaps.skills.engine import SkillEngine, build_default_registry
-    from tests.conftest import FakePlatform
+    from sinaps.plugins.testing import FakePlatform
 
     engine = SkillEngine(registry=build_default_registry(),
                          bus=EventBus(),
@@ -135,7 +135,7 @@ def test_greeting_does_not_need_microphone():
     from sinaps.core.bus import EventBus
     from sinaps.core.session import SessionController
     from sinaps.skills.engine import SkillEngine, build_default_registry
-    from tests.conftest import FakePlatform
+    from sinaps.plugins.testing import FakePlatform
 
     engine = SkillEngine(registry=build_default_registry(),
                          bus=EventBus(),

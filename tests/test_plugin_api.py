@@ -140,7 +140,7 @@ def test_plugins_package_holds_only_its_own_files():
     files = sorted(p.name for p in PLUGINS.glob("*.py"))
     assert files == ["__init__.py", "api.py", "approvals.py", "loader.py",
                      "manifest.py", "protocol.py", "runner.py",
-                     "sandbox.py", "state.py"], (
+                     "sandbox.py", "state.py", "testing.py"], (
         f"состав plugins/ изменился: {files}. Если добавлен новый модуль "
         "слоя — обнови список здесь, чтобы было видно, что это сделано "
         "намеренно."

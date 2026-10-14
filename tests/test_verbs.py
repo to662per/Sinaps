@@ -24,7 +24,7 @@ def _engine():
     from sinaps.core.bus import EventBus
     from sinaps.core.session import SessionController
     from sinaps.skills.engine import SkillEngine, build_default_registry
-    from tests.conftest import FakePlatform
+    from sinaps.plugins.testing import FakePlatform
 
     return SkillEngine(registry=build_default_registry(), bus=EventBus(),
                        session=SessionController(EventBus()),

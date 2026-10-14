@@ -16,7 +16,7 @@ import logging
 import re
 from dataclasses import dataclass
 
-from ..core.errors import InvalidSlot, SkillError, SkillNotFound
+from ..core.errors import InvalidSlot, SinapsError, SkillError, SkillNotFound
 from ..nlu.normalize import cleanup, normalize
 from ..nlu.slots import (
     parse_datetime_slot,
@@ -261,7 +261,20 @@ class SkillRegistry:
             if hasattr(result, "__await__"):
                 return await result
             return result
-        except SkillError:
+        except SinapsError:
+            # Ошибку, у которой есть `speech`, нельзя заворачивать.
+            #
+            # Раньше здесь стоял `except SkillError`, и любая другая
+            # наша ошибка — в том числе `PluginError` из дочернего
+            # процесса — превращалась в «Что-то сломалось, попробуй
+            # ещё раз». При этом `speech` через границу процесса мы
+            # переносили специально, и `api.py` прямо велит автору
+            # плагина бросать ошибки из витрины. Работать это могло
+            # только наполовину: объяснение доезжало и тут же
+            # выбрасывалось.
+            #
+            # Всё остальное — настоящие поломки, не связанные с
+            # контрактом — по-прежнему заворачивается.
             raise
         except Exception as exc:
             log.exception("Навык '%s' упал", match.spec.name)

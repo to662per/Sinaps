@@ -184,7 +184,7 @@ def test_program_list_phrases_are_understood(phrase):
     from sinaps.core.bus import EventBus
     from sinaps.core.session import SessionController
     from sinaps.skills.engine import SkillEngine, build_default_registry
-    from tests.conftest import FakePlatform
+    from sinaps.plugins.testing import FakePlatform
 
     engine = SkillEngine(registry=build_default_registry(),
                          bus=EventBus(),
@@ -213,7 +213,7 @@ def test_list_pattern_does_not_swallow_other_commands(phrase):
     from sinaps.core.bus import EventBus
     from sinaps.core.session import SessionController
     from sinaps.skills.engine import SkillEngine, build_default_registry
-    from tests.conftest import FakePlatform
+    from sinaps.plugins.testing import FakePlatform
 
     engine = SkillEngine(registry=build_default_registry(),
                          bus=EventBus(),
