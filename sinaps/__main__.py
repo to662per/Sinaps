@@ -826,8 +826,8 @@ async def _run_interactive_locked(
     """Собственно запуск. Отделён, чтобы освобождение экземпляра
     нельзя было забыть: `finally` стоит ровно в одном месте."""
     # Этап 2+: полноценное понимание команд вместо эхо-заглушки.
-    runtime = build_skills_runtime(cfg, with_audio=with_audio,
-                                   user_name=getattr(cfg, "user_name", "Капитан"))
+    runtime = await build_skills_runtime(cfg, with_audio=with_audio,
+                                         user_name=getattr(cfg, "user_name", "Капитан"))
     loop = asyncio.get_running_loop()
     stop = loop.create_future()
 
@@ -939,7 +939,7 @@ async def _run_interactive_locked(
         console.info("Микрофон не найден — включаю текстовый режим.")
         console.info("Весь разговор будет через консоль, голосовой ввод недоступен.")
         console.info("Проверить микрофон: python -m sinaps check-mic")
-        runtime = build_skills_runtime(cfg, with_audio=False,
+        runtime = await build_skills_runtime(cfg, with_audio=False,
                                        user_name=getattr(cfg, "user_name", "Капитан"))
         with_audio = False
 

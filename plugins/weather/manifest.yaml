@@ -1,0 +1,6 @@
+name: weather
+version: 1.0.0
+description: Прогноз погоды через Open-Meteo (без ключа, бесплатно)
+entry: plugin:register
+permissions:
+  - network.http

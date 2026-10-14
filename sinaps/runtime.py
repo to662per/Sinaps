@@ -25,6 +25,7 @@ from .platform.base import PlatformCapabilities
 from .platform.detect import build_platform
 from .skills.engine import SkillEngine, build_default_registry
 from .skills.registry import SkillRegistry
+from .plugins.loader import load_all, LoadReport
 from .stt.base import STTEngine, load_engine as load_stt
 from .tts.base import TTSEngine, load_engine as load_tts
 from .ui.trigger import ActivationTrigger, Trigger, parse_trigger
@@ -343,7 +344,7 @@ def build_assistant(cfg: SinapsConfig | None = None, *,
     return build_skills_runtime(cfg or get_config(), with_audio=with_audio)
 
 
-def build_skills_runtime(
+async def build_skills_runtime(
     cfg: SinapsConfig | None = None,
     *,
     with_audio: bool = True,
@@ -356,6 +357,8 @@ def build_skills_runtime(
     Отличие от `build_runtime`: поднимает платформу, реестр навыков и
     движок `SkillEngine` вместо эхо-заглушки.
     """
+    from pathlib import Path
+
     cfg = cfg or get_config()
 
     bus = EventBus()
@@ -375,6 +378,15 @@ def build_skills_runtime(
     log.info("Возможности платформы: %s", platform.name)
 
     registry = build_default_registry()
+
+    # --- загрузка плагинов ---
+    # Файл runtime.py лежит в sinaps/, корень проекта — parents[1]
+    plugins_dir = Path(__file__).resolve().parents[1] / "plugins"
+    load_report: LoadReport = await load_all(plugins_dir, registry)
+    log.info("Плагины: %s", load_report.summary())
+    for folder, reason in load_report.failed:
+        log.warning("Плагин %s не загружен: %s", folder, reason)
+
     engine = SkillEngine(
         registry,
         platform=platform,
