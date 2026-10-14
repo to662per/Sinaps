@@ -64,6 +64,30 @@ class SkillRegistry:
         for skill in skills:
             self.add(skill)
 
+    def remove(self, skill: Skill) -> bool:
+        """Убрать навык вместе со всеми его командами.
+
+        Нужно в двух местах. Первое — откат неудачной загрузки плагина:
+        если `register` упал на середине, его команды не должны остаться
+        в реестре. Второе — отключение плагина из трея без перезапуска
+        ассистента.
+
+        Возвращает `False`, если навыка в реестре не было: удалять
+        нечего, и это не ошибка — вызывающий сам решит, что делать.
+        """
+        if skill not in self._skills:
+            return False
+
+        self._skills.remove(skill)
+        names = {spec.name for spec in skill.intents}
+        self._specs = [spec for spec in self._specs if spec.name not in names]
+        self._rebuild_patterns()
+        return True
+
+    def spec_names(self) -> tuple[str, ...]:
+        """Все зарегистрированные намерения — для проверки конфликтов."""
+        return tuple(spec.name for spec in self._specs)
+
     def _rebuild_patterns(self) -> None:
         """Собирает общий список шаблонов в порядке проверки.
 

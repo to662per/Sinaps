@@ -138,7 +138,7 @@ def test_plugins_package_holds_only_its_own_files():
     тогда непонятно, чей это код и кто за него отвечает.
     """
     files = sorted(p.name for p in PLUGINS.glob("*.py"))
-    assert files == ["__init__.py", "api.py", "manifest.py"], (
+    assert files == ["__init__.py", "api.py", "loader.py", "manifest.py"], (
         f"состав plugins/ изменился: {files}. Если добавлен новый модуль "
         "слоя — обнови список здесь, чтобы было видно, что это сделано "
         "намеренно."
