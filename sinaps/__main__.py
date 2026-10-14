@@ -31,6 +31,7 @@ from pathlib import Path
 # читают переменные окружения в момент своего импорта, и если переменная
 # появится позже, библиотека уже решит, что сеть разрешена.
 from .core.offline import enforce_offline as _enforce_offline
+from .core.offline import report as _network_report
 
 _enforce_offline()
 
@@ -201,7 +202,7 @@ async def cmd_selftest(_args: argparse.Namespace) -> int:
             print(f"   ! предупреждение: {problem}")
         print(f"   OK: STT={cfg.stt.engine}/{cfg.stt.model}, TTS={cfg.tts.engine}, "
               f"VAD={cfg.vad.engine}")
-        print(f"   OK: приватность — {'локально, без сети' if cfg.privacy.local_only else 'СЕТЬ РАЗРЕШЕНА!'}")
+        print("   OK: приватность — " + _network_report())
     except Exception as exc:
         print(f"   FAIL: конфиг: {exc}")
         ok = False

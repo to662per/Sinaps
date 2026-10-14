@@ -19,6 +19,7 @@ from .conversation.pipeline import ConversationPipeline, Responder
 from .core.bus import EventBus, EventType
 from .core.config import SinapsConfig, get_config
 from .core.metrics import Metrics
+from .core.offline import report as network_report
 from .core.session import SessionController
 from .platform.base import PlatformCapabilities
 from .platform.detect import build_platform
@@ -130,7 +131,7 @@ class Runtime:
             f"{self.tts.sample_rate} Гц)\n"
             f"  VAD      : {cfg.vad.engine} (порог {cfg.vad.threshold}, тишина {cfg.vad.silence_ms} мс)\n"
             f"  Микрофон : {self.capture_label()}\n"
-            f"  Режим    : {'локально, без сети' if cfg.privacy.local_only else 'СЕТЬ РАЗРЕШЕНА'}\n"
+            f"  Режим    : {network_report()}\n"
             f"  Сессия   : {self.session.state.value}"
         )
 

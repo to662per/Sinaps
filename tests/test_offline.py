@@ -199,6 +199,83 @@ def test_removed_offline_guard_would_be_caught(tmp_path):
     offline.require_whisper_model("модели-нет", tmp_path)
 
 
+def test_report_states_plainly_when_everything_holds(monkeypatch):
+    for name in offline._OFFLINE_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(offline, "_NETWORK_PACKAGES", ())
+
+    offline.enforce_offline()
+
+    assert offline.report() == offline.describe()
+
+
+def test_report_warns_when_flag_missing(monkeypatch):
+    """Проверка обязана замечать, что оффлайн-режим выключен.
+
+    Раньше строка «локально, без сети» печаталась по флагу
+    `privacy.local_only`, который ничего не делал. Теперь вывод
+    опирается на измеримое состояние и молчать не должен.
+    """
+    for name in offline._OFFLINE_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(offline, "_NETWORK_PACKAGES", ())
+
+    report = offline.report()
+
+    assert "ПРЕДУПРЕЖДЕНИЕ" in report
+    assert "HF_HUB_OFFLINE" in report, "не сказано, какой именно флаг отсутствует"
+
+
+def test_report_warns_about_loaded_network_module(monkeypatch):
+    """Если движок подтянул сетевой модуль — это надо сказать."""
+    for name in offline._OFFLINE_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(offline, "_NETWORK_PACKAGES", ("httpx",))
+    monkeypatch.setitem(__import__("sys").modules, "httpx", object())
+
+    # Флаги выставляем: пока оффлайн не включён, проверка сообщает
+    # о нём и до сетевых модулей не доходит — порядок здесь осмысленный.
+    offline.enforce_offline()
+
+    report = offline.report()
+
+    assert "ВНИМАНИЕ" in report
+    assert "httpx" in report, "не сказано, какой именно модуль загружен"
+
+
+def test_missing_flags_reported_before_modules(monkeypatch):
+    """Отсутствие флагов важнее загруженных модулей — о нём и говорим."""
+    for name in offline._OFFLINE_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(offline, "_NETWORK_PACKAGES", ("httpx",))
+    monkeypatch.setitem(__import__("sys").modules, "httpx", object())
+
+    assert "ПРЕДУПРЕЖДЕНИЕ" in offline.report()
+
+
+def test_report_is_not_the_privacy_flag(monkeypatch):
+    """Отдельно фиксируем: вывод про сеть не зависит от `local_only`.
+
+    Тот флаг печатал «без сети», ничего не проверяя. Если кто-то
+    вернёт к нему проверку, тест упадёт.
+    """
+    for name in offline._OFFLINE_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(offline, "_NETWORK_PACKAGES", ())
+
+    from sinaps.core.config import SinapsConfig
+
+    cfg = SinapsConfig()
+    cfg.privacy.local_only = False
+
+    offline.enforce_offline()
+
+    assert offline.report() == offline.describe(), (
+        "вывод про сеть не должен зависеть от privacy.local_only — "
+        "флаг ничего не проверяет"
+    )
+
+
 def test_offline_mode_is_not_a_setting():
     """Запрета нет в конфиге намеренно — он не переключается."""
     from sinaps.core.config import SinapsConfig
