@@ -56,6 +56,8 @@ import logging
 import os
 from pathlib import Path
 
+from .errors import SinapsError
+
 log = logging.getLogger("sinaps.offline")
 
 #: Проектные каталоги. Модели лежат рядом с кодом, а не в пользовательских
@@ -75,11 +77,18 @@ _OFFLINE_VARS = (
 )
 
 
-class MissingModelError(RuntimeError):
+class MissingModelError(SinapsError):
     """Модели нет на диске, а скачивать запрещено.
 
     Отдельный тип, чтобы отличать «нет модели» от прочих поломок и
     говорить человеку точное объяснение, а не «движок недоступен».
+
+    Наследует `SinapsError` — не `RuntimeError`, и это важно. Обработчик
+    диалога ловит `SinapsError` и произносит `exc.speech` вслух
+    (`conversation/pipeline.py:183`). Обычное исключение уходит в
+    `except Exception`, и человек вместо «Запусти setup_sinaps.bat»
+    услышит «Что-то пошло не так, попробуй ещё раз» — то есть
+    приложение не сможет объяснить, что ему мешает работать.
     """
 
 

@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 
 import pytest
@@ -273,6 +274,90 @@ def test_report_is_not_the_privacy_flag(monkeypatch):
     assert offline.report() == offline.describe(), (
         "вывод про сеть не должен зависеть от privacy.local_only — "
         "флаг ничего не проверяет"
+    )
+
+
+# --- сообщение должно доходить до пользователя -----------------------------
+
+
+def test_missing_model_is_a_sinaps_error():
+    """Ошибка обязана быть типизированной, иначе её не услышат.
+
+    Обработчик диалога ловит `SinapsError` и произносит `exc.speech`
+    вслух (`conversation/pipeline.py:183`). Обычное исключение уходит в
+    `except Exception`, и человек вместо «Запусти setup_sinaps.bat»
+    услышит «Что-то пошло не так, попобуй ещё раз».
+
+    Первая версия наследовалась от `RuntimeError` — и это была находка:
+    код выглядел правильно, а объяснение терялось по дороге к человеку.
+    """
+    from sinaps.core.errors import SinapsError
+
+    assert issubclass(offline.MissingModelError, SinapsError), (
+        "MissingModelError обязана быть SinapsError: иначе обработчик "
+        "диалога не услышит её и скажет 'Что-то пошло не так'"
+    )
+
+
+def test_missing_model_error_keeps_message_and_speech():
+    err = offline.MissingModelError("Модель не найдена")
+
+    assert err.message == "Модель не найдена"
+    assert err.speech == "Модель не найдена"
+
+
+async def test_missing_model_message_reaches_the_user():
+    """Сквозной путь: движок бросает ошибку — человек слышит объяснение.
+
+    Способ взят из `test_pipeline.py`: конвейер ставится через `install()`,
+    ответ приходит событием шины. Ничего не угадывается.
+    """
+    from sinaps.conversation.pipeline import ConversationPipeline
+    from sinaps.core.bus import EventBus, EventType
+    from sinaps.core.errors import SinapsError
+    from sinaps.core.metrics import Metrics
+    from sinaps.core.session import SessionController
+
+    class NoTTS:
+        def speak(self, text, *args, **kwargs):
+            pass
+
+    class NoPlayer:
+        async def play(self, *args, **kwargs):
+            return None
+
+    async def honest_responder(text, context):
+        """Движок, который честно признаётся: модели нет.
+
+        Сигнатура взята из `make_echo_responder`: responder — это
+        асинхронная функция `(text, context)`, а не объект с методом.
+        Первая версия теста угадывала и упала с `object is not callable`.
+        """
+        raise offline.MissingModelError(
+            "Модель распознавания не найдена. Запусти setup_sinaps.bat.")
+
+    bus = EventBus()
+    session = SessionController(bus)
+    spoken: list[str] = []
+
+    async def collect(event):
+        spoken.append(event.payload.get("text", ""))
+
+    bus.on(EventType.RESPONSE_READY)(collect)
+
+    conv = ConversationPipeline(
+        bus=bus, session=session, tts=NoTTS(), player=NoPlayer(),
+        metrics=Metrics(), responder=honest_responder,
+    )
+    conv.install()
+
+    await conv.handle_text_input("привет")
+    await asyncio.sleep(0.05)
+
+    assert spoken, "конвейер не ответил вовсе"
+    assert "setup_sinaps" in spoken[-1], (
+        f"пользователю сказали {spoken[-1]!r} вместо объяснения, "
+        "что нужно запустить установщик"
     )
 
 
