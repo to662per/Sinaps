@@ -1,0 +1,2 @@
+# This file keeps the plugins/ directory tracked in git.
+# User plugins go here but are NOT committed (see .gitignore).

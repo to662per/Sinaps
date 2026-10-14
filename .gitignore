@@ -27,10 +27,9 @@ data/
 *.ТЗ.md
 Памятка*.md
 
-# IDE
-.vscode/
-.idea/
-*.swp
+# Локальные плагины пользователя (папка есть в репозитории, содержимое — нет)
+plugins/*
+!plugins/.gitkeep
 
 # OS
 .DS_Store
