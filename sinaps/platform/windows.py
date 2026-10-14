@@ -27,6 +27,7 @@ from ctypes import wintypes
 from pathlib import Path
 
 from ..core.logging_setup import get_dialogue_logger
+from . import audio as _audio
 from .base import (
     AppInfo,
     AppLaunchMethod,
@@ -48,6 +49,12 @@ VK_VOLUME_MUTE = 0xAD
 VK_VOLUME_DOWN = 0xAE
 VK_VOLUME_UP = 0xAF
 KEYEVENTF_KEYUP = 0x0002
+
+#: Шаг клавиши громкости в процентах. Замерено на этой машине:
+#: `GetVolumeStepInfo` отдал 50 при диапазоне 100, одно нажатие
+#: изменило уровень ровно на 2.0. Константа — запасной вариант на
+#: случай, если COM недоступен и читать шаг нечем.
+_VOLUME_STEP_PERCENT = 2
 
 #: Сочетание для скриншота.
 VK_LCONTROL, VK_LWIN, VK_PRINT = 0xA2, 0x5B, 0x2C
@@ -420,20 +427,58 @@ class WindowsPlatform:
 
     # --- громкость --------------------------------------------------------
 
-    def _volume_key(self, key: int, steps: int) -> bool:
+    def _volume_key(self, key: int, times: int) -> bool:
+        """Нажать клавишу громкости заданное число раз.
+
+        Запасной путь: работает и там, где COM недоступен, но уровень
+        двигает дискретно — ровно на 2 процента за нажатие (замерено).
+        """
         if user32 is None:
             return False
-        for _ in range(max(1, min(steps, 25))):
+        for _ in range(max(1, min(times, 25))):
             user32.keybd_event(key, 0, 0, 0)
             user32.keybd_event(key, 0, KEYEVENTF_KEYUP, 0)
             time.sleep(0.01)
         return True
 
-    def volume_up(self, steps: int = 1) -> bool:
-        return self._volume_key(VK_VOLUME_UP, steps)
+    def volume_up(self, percent: int = 10) -> bool:
+        return self._shift_volume(percent, up=True)
 
-    def volume_down(self, steps: int = 1) -> bool:
-        return self._volume_key(VK_VOLUME_DOWN, steps)
+    def volume_down(self, percent: int = 10) -> bool:
+        return self._shift_volume(percent, up=False)
+
+    def _shift_volume(self, percent: int, up: bool) -> bool:
+        """Сдвинуть громкость на столько процентов.
+
+        Единица измерения здесь и дальше по проекту — проценты, а не
+        число нажатий. Раньше навык объявлял «на 5 ступеней», а
+        громкость при этом уезжала на 10 процентов (шаг клавиши — 2):
+        одно и то же число означало для слушающего и для системы разное.
+        """
+        percent = max(1, min(int(percent), 100))
+
+        current = _audio.read()
+        if current is not None:
+            level, muted = current
+            if up:
+                target = min(100, level + percent)
+            else:
+                target = max(0, level - percent)
+            if target == level:
+                return True          # уже на краю, нажимать нечего
+            # Приглушенный звук сдвигается «вхолостую»: уровень растёт,
+            # а слышно ничего. Меняем и приглушение, иначе ассистент
+            # скажет «сделал громче», а в комнате по-прежнему тишина.
+            return _audio.set_percent(target) and (
+                not muted or _audio.set_muted(False)
+            )
+
+        # COM недоступен — жмём клавишу. Шаг берём замеренный:
+        # чтение API отдаёт 50 и 51, и по нему вышло бы 39 процентов
+        # за нажатие вместо двух.
+        times = max(1, round(percent / _VOLUME_STEP_PERCENT))
+        key = VK_VOLUME_UP if up else VK_VOLUME_DOWN
+        return self._volume_key(key, times)
 
     def volume_mute(self) -> bool:
         if user32 is None:
@@ -443,12 +488,20 @@ class WindowsPlatform:
         return True
 
     def volume_state(self) -> VolumeState:
-        """Абсолютную громкость без COM не прочитать.
+        """Настоящий уровень громкости.
 
-        Честнее вернуть `percent=None`, чем выдумать число: иначе навык
-        «какая громкость» будет называть случайную величину.
+        Раньше здесь всегда стояло `percent=None` — считалось, что без
+        COM уровень не прочитать. Замер показал, что читается: ключ
+        Windows даёт шаг 50 из 100, то есть ровно 2 процента за
+        нажатие, и этими же единицами считается всё остальное.
+
+        `percent=None` остаётся только когда прочитать не вышло.
         """
-        return VolumeState(percent=None, muted=False, supported=True)
+        current = _audio.read()
+        if current is None:
+            return VolumeState(percent=None, muted=False, supported=False)
+        level, muted = current
+        return VolumeState(percent=level, muted=muted, supported=True)
 
     # --- медиа ------------------------------------------------------------
 
@@ -516,11 +569,41 @@ class WindowsPlatform:
         return True
 
     def minimize_all(self) -> bool:
-        """Свернуть все окна. Только Windows — такого сочетания нет на других ОС."""
+        """Свернуть все окна. Только Windows — такого сочетания нет на других ОС.
+
+        Раньше здесь был `ShellExecuteW("Minimize")`. Замер на трёх
+        открытых окнах: он возвращал успех и не сворачивал ни одного —
+        0 из 3. Слова «Minimize» оболочка на рабочем столе больше не
+        понимает, а метод при этом возвращал `True`, и ассистент
+        уверенно объявлял: «Сворачиваю всё».
+
+        Теперь каждому видимому окну отправляется WM_SYSCOMMAND со
+        SC_MINIMIZE: тот же замер даёт 3 из 3.
+
+        Win+D не годится: это переключатель, и вторая команда подряд
+        развернула бы окна обратно. Для голоса это ловушка — человек
+        сказал дважды и получил обратное. SC_MINIMIZE идемпотентен:
+        повторный вызов оставляет окна свёрнутыми.
+        """
         if user32 is None:
             return False
-        shell = ctypes.WinDLL("shell32")
-        return bool(shell.ShellExecuteW(None, "U", None, None, "Minimize", 0))
+
+        handles: list[int] = []
+        proc = ctypes.WINFUNCTYPE(
+            ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+
+        def collect(hwnd, _lparam):
+            if user32.IsWindowVisible(hwnd):
+                handles.append(hwnd)
+            return True
+
+        user32.EnumWindows(proc(collect), 0)
+        if not handles:
+            return False
+
+        for hwnd in handles:
+            user32.PostMessageW(hwnd, 0x0112, 0xF020, 0)  # SC_MINIMIZE
+        return True
 
     # --- ввод и буфер -----------------------------------------------------
 

@@ -89,8 +89,17 @@ class TextSelection:
 
 @runtime_checkable
 class VolumeSupport(Protocol):
-    def volume_up(self, steps: int = 1) -> bool: ...
-    def volume_down(self, steps: int = 1) -> bool: ...
+    """Громкость. Единица во всех методах — проценты, не нажатия.
+
+    Раньше параметр назывался `steps` и означал число нажатий клавиши.
+    Одно нажатие сдвигает уровень на 2 процента, поэтому «5 ступеней»
+    на слух и на экране означали разное: голос говорил 5, а громкость
+    уезжала на 10. Проценты — это то, что человек видит и о чём
+    говорит, поэтому единица измерения вынесена в имя параметра.
+    """
+
+    def volume_up(self, percent: int = 10) -> bool: ...
+    def volume_down(self, percent: int = 10) -> bool: ...
     def volume_mute(self) -> bool: ...
     def volume_state(self) -> VolumeState: ...
 
@@ -200,10 +209,10 @@ class Unsupported(PlatformCapabilities):
     def list_apps(self) -> list[AppInfo]:
         return []
 
-    def volume_up(self, steps: int = 1) -> bool:
+    def volume_up(self, percent: int = 10) -> bool:
         return self._no("volume_up")
 
-    def volume_down(self, steps: int = 1) -> bool:
+    def volume_down(self, percent: int = 10) -> bool:
         return self._no("volume_down")
 
     def volume_mute(self) -> bool:

@@ -31,8 +31,13 @@ class FakePlatform:
         PowerAction.SIGN_OUT,
     )
 
-    def __init__(self) -> None:
+    def __init__(self, volume_percent: int = 50) -> None:
         self.calls: list[str] = []
+        #: Уровень громкости меняется по-настоящему: навык читает его
+        #: до и после сдвига и отвечает «теперь N процентов». Заглушка,
+        #: которая всегда возвращает одно и то же число, проверяла бы
+        #: саму себя, а не код.
+        self.volume_percent = volume_percent
 
     def launch_app(self, name: str) -> tuple[bool, str]:
         self.calls.append(f"launch:{name}")
@@ -41,12 +46,14 @@ class FakePlatform:
     def list_apps(self) -> list[AppInfo]:
         return [AppInfo(name="Блокнот", target="notepad.exe")]
 
-    def volume_up(self, steps: int = 1) -> bool:
-        self.calls.append(f"volume_up:{steps}")
+    def volume_up(self, percent: int = 10) -> bool:
+        self.calls.append(f"volume_up:{percent}")
+        self.volume_percent = min(100, self.volume_percent + percent)
         return True
 
-    def volume_down(self, steps: int = 1) -> bool:
-        self.calls.append(f"volume_down:{steps}")
+    def volume_down(self, percent: int = 10) -> bool:
+        self.calls.append(f"volume_down:{percent}")
+        self.volume_percent = max(0, self.volume_percent - percent)
         return True
 
     def volume_mute(self) -> bool:
@@ -54,7 +61,9 @@ class FakePlatform:
         return True
 
     def volume_state(self) -> VolumeState:
-        return VolumeState(percent=None, supported=True)
+        # Держим настоящий процент, а не None: навык громкости читает
+        # уровень до и после изменения, иначе нечего проверять.
+        return VolumeState(percent=self.volume_percent, supported=True)
 
     def media_play_pause(self) -> bool:
         self.calls.append("play_pause")

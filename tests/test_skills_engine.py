@@ -64,19 +64,65 @@ async def test_status_uptime_is_sane(engine, platform_stub):
     )
 
 
-async def test_volume_up_uses_steps(engine, platform_stub):
+async def test_volume_up_uses_percent(engine, platform_stub):
     await say(engine, "прибавь громкость на три")
     assert platform_stub.calls == ["volume_up:3"]
 
 
-async def test_volume_down_uses_steps(engine, platform_stub):
+async def test_volume_down_uses_percent(engine, platform_stub):
     await say(engine, "сделай тише на два")
     assert platform_stub.calls == ["volume_down:2"]
 
 
-async def test_volume_up_default_steps(engine, platform_stub):
+async def test_volume_up_default_percent(engine, platform_stub):
+    """Без названного числа — 10 процентов.
+
+    Раньше здесь стояло 5: это было число нажатий клавиши, каждое из
+    которых сдвигает уровень на 2 процента, и голос объявлял «5» при
+    фактических 10. Теперь единица одна — проценты.
+    """
     await say(engine, "сделай громче")
-    assert platform_stub.calls == ["volume_up:5"]
+    assert platform_stub.calls == ["volume_up:10"]
+
+
+async def test_volume_up_reports_measured_level(engine, platform_stub):
+    """Ответ обязан совпадать с тем, что реально стало.
+
+    Раньше навык объявлял величину сдвига, а не результат: человек
+    слышал «5» и видел, что громкость уехала на 10 процентов, и
+    решал, что ассистент считает неверно. Теперь результат измерен.
+    """
+    reply = await say(engine, "сделай громче на десять")
+    assert platform_stub.volume_percent == 60
+    assert "60" in reply.speech
+
+
+async def test_volume_down_reports_measured_level(engine, platform_stub):
+    reply = await say(engine, "сделай тише на десять")
+    assert platform_stub.volume_percent == 40
+    assert "40" in reply.speech
+
+
+async def test_volume_up_at_maximum_says_already(engine, platform_stub):
+    """У края диапазона нельзя обещать сдвиг, которого не будет."""
+    platform_stub.volume_percent = 100
+    reply = await say(engine, "сделай громче на двадцать")
+    assert "уже 100" in reply.speech
+
+
+async def test_volume_up_clamps_at_edge(engine, platform_stub):
+    """Просили больше, чем оставалось, — отвечаем о фактическом итоге."""
+    platform_stub.volume_percent = 90
+    reply = await say(engine, "сделай громче на тридцать")
+    assert platform_stub.volume_percent == 100
+    assert "100" in reply.speech
+
+
+async def test_volume_level_reports_percent(engine, platform_stub):
+    """Пункт «точная громкость»: навык з��ания уровня."""
+    platform_stub.volume_percent = 37
+    reply = await say(engine, "какая громкость")
+    assert "37" in reply.speech
 
 
 # --- опасные команды: главное ----------------------------------------------
