@@ -169,7 +169,7 @@ class QtHost:
         """Жизненный цикл ассистента в asyncio-потоке."""
         assert self.loop is not None
         try:
-            runtime = self._build()
+            runtime = await self._build()
         except Exception as exc:                    # noqa: BLE001
             self._startup.error = str(exc)
             self._ready.set()
@@ -199,7 +199,7 @@ class QtHost:
         log.info("Завершаю работу по команде из интерфейса")
         await runtime.stop()
 
-    def _build(self):
+    async def _build(self):
         """Получает готовый рантайм.
 
         Сборку графа делает `runtime.py` — правило проекта: ручная сборка
@@ -225,7 +225,7 @@ class QtHost:
         elif want_audio:
             self._notice = ""
 
-        return build_assistant(self.cfg, with_audio=want_audio)
+        return await build_assistant(self.cfg, with_audio=want_audio)
 
     def _want_audio(self) -> bool:
         return not self._no_audio
