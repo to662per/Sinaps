@@ -116,6 +116,16 @@ class WindowSupport(Protocol):
     def list_windows(self) -> list[WindowInfo]: ...
     def focus_window(self, handle: int) -> bool: ...
     def close_window(self, handle: int) -> bool: ...
+    def resolve_process_name(self, query: str) -> str:
+        """Имя процесса по названию из голоса. Пусто, если не вышло.
+
+        Нужно, чтобы закрытие пользовалось той же таблицей названий,
+        что и запуск. Иначе «открой блокнот» срабатывает, а «закрой
+        блокнот» — нет: поиск шёл по буквальной подстроке, и
+        `'блокнот' in 'notepad'` ложно.
+        """
+        ...
+
     def minimize_all(self) -> bool: ...
 
 
@@ -238,6 +248,9 @@ class Unsupported(PlatformCapabilities):
 
     def close_window(self, handle: int) -> bool:
         return self._no("close_window")
+
+    def resolve_process_name(self, query: str) -> str:
+        return ""
 
     def minimize_all(self) -> bool:
         return self._no("minimize_all")

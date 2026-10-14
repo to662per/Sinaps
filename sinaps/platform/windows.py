@@ -544,7 +544,17 @@ class WindowsPlatform:
             title = buffer.value.strip()
             if not title:
                 return True
-            windows.append(WindowInfo(handle=hwnd, title=title))
+            # Имя процесса нужно, чтобы закрывать приложение, а не окно
+            # с заголовком: у Блокнота с открытым файлом заголовок —
+            # «sinaps.log — Блокнот», и по нему имя процесса не узнать.
+            try:
+                wpid = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(wpid))
+                process = _process_name(wpid.value)
+            except Exception:
+                log.debug("Не удалось узнать процесс окна", exc_info=True)
+                process = ""
+            windows.append(WindowInfo(handle=hwnd, title=title, process=process))
             return True
 
         try:
@@ -567,6 +577,42 @@ class WindowsPlatform:
             return False
         user32.PostMessageW(handle, 0x0010, 0, 0)  # WM_CLOSE
         return True
+
+    def resolve_process_name(self, query: str) -> str:
+        """Имя процесса, которое имел в виду человек.
+
+        Зачем это отдельным методом
+        -------------------------
+        `launch_app` переводит «блокнот» через `_BUILTIN_APPS` в
+        `notepad.exe`, а закрытие искало буквальную подстроку и находило
+        ноль: `'блокнот' in 'notepad'` ложно. Получалось, что открыть
+        можно по-русски, а закрыть — только по-английски, и в логе это
+        читалось как «всё отработало правильно», потому что запрос
+        доезжал верно.
+
+        Теперь обе стороны пользуются одной таблицей. Возвращается имя
+        процесса без `.exe` — в том виде, в каком его отдаёт psutil.
+        """
+        key = (query or "").strip().lower()
+        if not key:
+            return ""
+
+        builtin = _BUILTIN_APPS.get(key)
+        if builtin:
+            exe = builtin[0].split()[0]
+            return exe.rsplit(".", 1)[0].lower()
+
+        # Уже похоже на имя процесса: `notepad`, `chrome`, `notepad.exe`.
+        bare = key.rsplit(".", 1)[0] if key.endswith(".exe") else key
+        if bare and all(ch.isalnum() or ch in "._-" for ch in bare):
+            return bare
+
+        # Русское название без таблицы: пробуем имя ярлыка как есть.
+        found = self.find_app(key)
+        if found:
+            target = found.target.split()[0]
+            return target.rsplit(".", 1)[0].lower()
+        return ""
 
     def minimize_all(self) -> bool:
         """Свернуть все окна. Только Windows — такого сочетания нет на других ОС.
@@ -859,6 +905,24 @@ def _launch_path(name: str) -> bool:
             log.debug("Не удалось запустить %s", found, exc_info=True)
 
     return False
+
+
+def _process_name(pid: int) -> str:
+    """Имя процесса по PID, без PowerShell.
+
+    PowerShell здесь не годится: список окон перечисляется на каждый
+    взгляд на панель, а запускать процесс ради каждого окна — значит
+    поднимать окна PowerShell пачками. Имя процесса и так лежит в
+    системе, берём его напрямую.
+    """
+    if not pid:
+        return ""
+    try:
+        import psutil
+
+        return psutil.Process(pid).name()
+    except Exception:
+        return ""
 
 
 def _run_powershell(script: str, timeout: float = 10.0) -> str:

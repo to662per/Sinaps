@@ -78,7 +78,7 @@ class FakePlatform:
         return True
 
     def list_windows(self) -> list[WindowInfo]:
-        return [WindowInfo(handle=42, title="Блокнот")]
+        return [WindowInfo(handle=42, title="Блокнот", process="notepad.exe")]
 
     def focus_window(self, handle: int) -> bool:
         self.calls.append(f"focus:{handle}")
@@ -87,6 +87,20 @@ class FakePlatform:
     def close_window(self, handle: int) -> bool:
         self.calls.append(f"close_window:{handle}")
         return True
+
+    def resolve_process_name(self, query: str) -> str:
+        # Та же таблица, что и на настоящей Windows-платформе: иначе
+        # тест проверял бы заглушку вместо кода.
+        return {
+            "блокнот": "notepad",
+            "notepad": "notepad",
+            "калькулятор": "calc",
+            "кальк": "calc",
+            "диспетчер задач": "taskmgr",
+            "paint": "mspaint",
+            "проводник": "explorer",
+            "командная строка": "cmd",
+        }.get(query.strip().lower(), "")
 
     def minimize_all(self) -> bool:
         self.calls.append("minimize_all")

@@ -37,9 +37,28 @@ def register() -> Skill:
         return Response(speech=info, display=f"не найдено: {query}")
 
     async def close_app(ctx, slots):  # noqa: ANN001
-        # Убийство процесса — грубая операция, но пользователь просил явно.
-        query = slots["name"].lower()
-        killed = _kill_process(query)
+        query = slots["name"].strip()
+        if not query:
+            return Response(speech="Скажи, что закрыть")
+
+        # Сначала окна: WM_CLOSE даёт приложению шанс спросить
+        # «сохранить изменения» и закрыться штатно. terminate() этого
+        # не умеет — несохранённый текст пропадал бы молча.
+        #
+        # Порядок именно такой: окно мы закрываем, а если окна нет —
+        # значит это фоновая программа, и terminate() единственный
+        # способ.
+        closed, save_warning = _close_windows(ctx.platform, query)
+        if closed:
+            return Response(
+                speech=save_warning,
+                display=f"окон закрыто: {closed}",
+            )
+
+        # Окна не нашлись: у процесса их может не быть вовсе
+        # (служба, фоновая утилита). Тогда — terminate.
+        target = _resolve(ctx.platform, query)
+        killed = _kill_process(target) if target else 0
         if not killed:
             return Response(speech=f"Не нашёл, что закрыть: {query}")
         plural = "процесс" if killed == 1 else "процесса"
@@ -173,13 +192,106 @@ def register() -> Skill:
     return skill
 
 
-def _kill_process(query: str) -> int:
-    """Закрывает процессы по имени. Возвращает количество закрытых."""
+def _resolve(platform, query: str) -> str:
+    """Имя процесса, которое человек назвал голосом.
+
+    Просит у платформы: таблица русских названий одна на запуск и на
+    закрытие. Раньше закрытие её не знало и искало буквальную
+    подстроку — `'блокнот' in 'notepad'` ложно, поэтому «закрой
+    блокнот» всегда отвечал «не нашёл».
+    """
+    try:
+        return platform.resolve_process_name(query)
+    except Exception:
+        return ""
+
+
+def _matches(candidate: str, target: str) -> bool:
+    """Точное совпадение имени, а не подстрока.
+
+    Подстрока опасна: «закрой блок» закрыл бы и `blender`, и `notepad`
+    разом, а «закрой chrome» — ещё и `chromecast`. Подсказка может
+    быть нечёткой, действие — нет.
+    """
+    if not candidate or not target:
+        return False
+    return candidate == target
+
+
+#: Заголовки окон, которые нельзя закрывать.
+#:
+#: «Program Manager» — это окно рабочего стола, а не программа. Имя
+#: его процесса — `explorer`, то есть совпадает с «закрой проводник».
+#: Без этой проверки голосовая команда закрывала бы рабочий стол
+#: Windows целиком.
+_DESKTOP_TITLES = {"program manager", "рабочий стол", "desktop"}
+
+
+def _is_desktop_shell(window) -> bool:  # noqa: ANN001
+    return (window.title or "").strip().lower() in _DESKTOP_TITLES
+
+
+def _close_windows(platform, query: str) -> tuple[int, str]:
+    """Закрыть окна приложения через WM_CLOSE.
+
+    Возвращает (сколько закрыто, что сказать). Окно ищется по имени
+    ПРОЦЕССА, а не по заголовку: у Блокнота с открытым файлом
+    заголовок — «sinaps.log — Блокнот», и имя программы из него не
+    извлечь. Пользователь просил закрыть Блокнот — закрываем Блокнот,
+    а не файл.
+    """
+    target = _resolve(platform, query)
+    if not target:
+        return 0, ""
+
+    try:
+        windows = platform.list_windows()
+    except Exception:
+        return 0, ""
+
+    # Окна скрытые тоже считаем: приложение может быть свёрнуто в
+    # трей, и человек всё равно считает его открытым.
+    #
+    # Оболочку рабочего стола пропускаем обязательно: у неё имя
+    # процесса тоже `explorer`, а заголовок — «Program Manager». Её
+    # закрытие уронит рабочий стол Windows. Проверка идёт по заголовку
+    # и по имени класса окна, потому что переименовать «Program
+    # Manager» нельзя, а вот подделать заголовок обычного окна легко —
+    # и вот тогда проверка по имени класса спасёт.
+    handles = [
+        w.handle for w in windows
+        if _matches((w.process or "").lower().replace(".exe", ""), target)
+        and not _is_desktop_shell(w)
+    ]
+    if not handles:
+        return 0, ""
+
+    closed = 0
+    for handle in handles:
+        try:
+            if platform.close_window(handle):
+                closed += 1
+        except Exception:
+            continue
+
+    if not closed:
+        return 0, ""
+
+    word = "окно" if closed == 1 else "окна" if closed < 5 else "окон"
+    return closed, f"Закрыл {closed} {word}"
+
+
+def _kill_process(target: str) -> int:
+    """Завершить процессы по имени. Запасной путь для оконных нет.
+
+    Вызывается, когда у процесса нет видимых окон: у служб и фоновых
+    утилит их не бывает вовсе.
+    """
     import psutil
 
     killed = 0
-    needle = query.lower().replace(".exe", "").strip()
-    if not needle:
+    target = (target or "").lower().replace(".exe", "").strip()
+    if not target:
         return 0
 
     own_pid = psutil.Process().pid
@@ -191,7 +303,7 @@ def _kill_process(query: str) -> int:
             # Свой процесс и критичные службы не трогаем.
             if info.get("pid") == own_pid or not name:
                 continue
-            if needle in name and name not in _PROTECTED:
+            if _matches(name, target) and name not in _PROTECTED:
                 process.terminate()
                 killed += 1
         except (psutil.NoSuchProcess, psutil.AccessDenied):
