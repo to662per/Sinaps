@@ -25,6 +25,15 @@ import time
 import numpy as np
 from pathlib import Path
 
+# --- оффлайн-режим ---------------------------------------------------------
+#
+# Обязательно до импорта движков ниже. `huggingface_hub` и `torch.hub`
+# читают переменные окружения в момент своего импорта, и если переменная
+# появится позже, библиотека уже решит, что сеть разрешена.
+from .core.offline import enforce_offline as _enforce_offline
+
+_enforce_offline()
+
 from .audio.capture import AudioCapture, dbfs, read_wav, record_to_file, resample
 from .audio.devices import has_input_device, print_devices
 from .audio.source import FileAudioSource

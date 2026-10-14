@@ -21,6 +21,8 @@ import numpy as np
 
 from ..core.config import PROJECT_ROOT
 from ..core.errors import EngineUnavailable
+from ..core.offline import MissingModelError
+from ..core.offline import require_whisper_model as _require_whisper_model
 from .base import STTEngine, Transcript
 
 log = logging.getLogger(__name__)
@@ -194,14 +196,25 @@ class FasterWhisperEngine(STTEngine):
             )
 
         try:
+            _require_whisper_model(self.model_name, self.download_root)
             self._model = WhisperModel(
                 self.model_name,
                 device=device,
                 compute_type=compute,
                 download_root=self.download_root,
+                # Без этого параметра библиотека при отсутствии модели
+                # молча идёт на HuggingFace. Сеть в ядре запрещена, поэтому
+                # проверка выше бросает MissingModelError раньше, а этот
+                # флаг — вторая линия: он держит, даже если проверку
+                # обойдут.
+                local_files_only=True,
                 cpu_threads=0,  # 0 = автоматически по числу ядер
                 num_workers=1,
             )
+        except MissingModelError:
+            # Модели нет — это не поломка движка, а состояние машины.
+            # Своё сообчение понятнее, чем «движок недоступен».
+            raise
         except Exception as exc:
             # Самая частая ошибка у новичков: нет CUDA-библиотек или не хватает
             # VRAM. Откатываемся на CPU — лучше медленно, чем не работает.
@@ -211,7 +224,7 @@ class FasterWhisperEngine(STTEngine):
                 try:
                     self._model = WhisperModel(
                         self.model_name, device=device, compute_type=compute,
-                        download_root=self.download_root,
+                        download_root=self.download_root, local_files_only=True,
                     )
                 except Exception as exc2:
                     raise EngineUnavailable(self.name, str(exc2)) from exc2

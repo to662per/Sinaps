@@ -28,6 +28,9 @@ import threading
 import numpy as np
 
 from ..core.errors import EngineUnavailable
+from ..core.offline import MissingModelError
+from ..core.offline import hub_repo_path as _hub_repo_path
+from ..core.offline import require_tts_models as _require_tts_models
 from .base import TTSEngine
 
 log = logging.getLogger(__name__)
@@ -86,17 +89,32 @@ class SileroTTS(TTSEngine):
             if self._model is not None:
                 return
             try:
+                # Проверяем кэш до вызова: `torch.hub.load(source="github")`
+                # при пустом кэше выходит в интернет. Сеть в ядре запрещена,
+                # поэтому отсутствие модели — понятная ошибка, а не повод
+                # скачать. Раньше здесь был текст «проверь интернет при
+                # первом запуске»: ядро само предлагало человеку открыть
+                # сеть, нарушая собственное обещание.
+                _require_tts_models()
                 import torch  # noqa: F401
 
+                # `source="local"` вместо `source="github"` — ключевое
+                # изменение. При `github` torch.hub при пустом кэше сам
+                # идёт в интернет; при `local` берёт код из папки на
+                # диске и сеть не задействует вовсе. Установщик
+                # складывает эту папку заранее, поэтому путь всегда есть.
                 model, _example = torch.hub.load(
-                    repo_or_dir=_REPO,
+                    repo_or_dir=str(_hub_repo_path()),
                     model="silero_tts",
-                    source="github",
+                    source="local",
                     language=self.language,
                     speaker=_SPEAKER_MODEL if self.language == "ru" else f"{self.language}_v3",
                     trust_repo=True,
                     verbose=False,
                 )
+            except MissingModelError:
+                # Модели нет — состояние машины, а не поломка движка.
+                raise
             except ImportError as exc:
                 raise EngineUnavailable(
                     self.name,
@@ -105,8 +123,8 @@ class SileroTTS(TTSEngine):
             except Exception as exc:
                 raise EngineUnavailable(
                     self.name,
-                    "Не удалось загрузить модель Silero (проверь интернет при первом "
-                    f"запуске и наличие omegaconf/scipy): {exc}",
+                    "Не удалось загрузить модель Silero из локального кэша "
+                    f"(проверь наличие omegaconf/scipy): {exc}",
                 ) from exc
 
             self._model = model

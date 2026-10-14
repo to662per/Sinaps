@@ -59,9 +59,28 @@ ALLOWED_UPSTREAM = {
 OS_SPECIFIC = {"platform.windows", "platform.macos", "platform.linux"}
 
 #: Библиотеки, которые запрещены: проект не ходит в сеть.
+#:
+#: Совершается ПРЕФИКСНОЕ совпадение по компонентам пути, а не только по
+#: корневому имени. Раньше здесь был набор вида {"urllib.request",
+#: "http.client"}, а проверка брала `name.split(".")[0]` — то есть
+#: `urllib` и `http`. Ни того, ни другого в наборе не было, поэтому
+#: `import urllib.request` и `import http.client` проходили молча:
+#: проверка обещала не пускать сеть и не пускала.
 FORBIDDEN_NETWORK = {
-    "requests", "httpx", "aiohttp", "urllib3", "urllib.request",
-    "socket", "http.client", "ftplib", "telnetlib",
+    "requests", "httpx", "aiohttp", "urllib", "urllib3", "urllib.request",
+    "socket", "http", "http.client", "ftplib", "telnetlib",
+    "smtplib", "poplib", "imaplib", "xmlrpc", "websockets", "websockets.sync",
+}
+
+#: Модули, которым сеть положена. Ядро их не импортирует.
+#:
+#: `setup.py` качает модели при установке — это отдельная программа,
+#: которую человек запускает руками, и во время работы ассистента она
+#: не участвует. `plugins/network.py` появится на этапе 5: это прокси,
+#: который отдаёт сеть плагину по разрешению.
+NETWORK_ALLOWLIST = {
+    "sinaps.setup",
+    "sinaps.plugins.network",
 }
 
 #: Кто имеет право собирать граф зависимостей.
@@ -102,16 +121,114 @@ def test_file_parses(path: Path):
     ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
 
 
+def _is_forbidden_network(name: str) -> bool:
+    """Запрещён ли импорт.
+
+    Сравнение по компонентам: `urllib.request` должен ловиться по
+    `urllib`, а `http.client` — по `http`. Раньше сравнение шло по
+    корню, и оба проходили молча.
+    """
+    clean = name.lstrip(".").split(".")
+    for size in range(len(clean), 0, -1):
+        if ".".join(clean[:size]) in FORBIDDEN_NETWORK:
+            return True
+    return False
+
+
 @pytest.mark.parametrize("path", _python_files(), ids=lambda p: p.name)
 def test_no_network_imports(path: Path):
     """Требование проекта: строго локальная работа, без сети."""
+    module = _module_name(path)
+    if module in NETWORK_ALLOWLIST:
+        return
+
+    # Модуль с сетью по назначению — установщик моделей.
+
     tree = ast.parse(path.read_text(encoding="utf-8"))
     for name in _imported_modules(tree):
-        root = name.lstrip(".").split(".")[0]
-        assert root not in FORBIDDEN_NETWORK, (
+        if name.startswith("."):
+            continue
+        assert not _is_forbidden_network(name), (
             f"{path.name}: запрещён сетевой импорт '{name}'. "
             "Проект работает локально; для сетевого режима нужен явный флаг."
         )
+
+
+@pytest.mark.parametrize("module", [
+    "urllib.request",       # ловилось по корню «urllib», его в наборе не было
+    "http.client",          # так же: корень «http»
+    "urllib",               # голый корень
+    "httpx",
+    "requests",
+    "socket",
+    "aiohttp",
+    "smtplib",
+])
+def test_network_check_actually_catches(module: str):
+    """Проверка проверки.
+
+    Тест «нет сетевых импортов» сам может быть сломан так, что ничего не
+    ловит. Именно так и вышло: `urllib.request` и `http.client` были в
+    запрещённом списке, но сравнение шло по корневому имени, которого
+    в списке не было. Тест зелёный, а сеть проходила.
+    """
+    assert _is_forbidden_network(module), (
+        f"проверка не ловит '{module}' — она ничего не защищает"
+    )
+
+
+@pytest.mark.parametrize("module", [
+    "os", "pathlib", "numpy", "yaml", "psutil", "sinaps.core.bus",
+])
+def test_network_check_does_not_overreact(module: str):
+    """Обычные модули не должны попадать под запрет."""
+    assert not _is_forbidden_network(module)
+
+
+@pytest.mark.parametrize("path", _python_files(), ids=lambda p: p.name)
+def test_no_torch_hub_from_internet(path: Path):
+    """Неявный выход в сеть через torch.hub.
+
+    Прямых сетевых импортов в ядре нет, но `torch.hub.load(source=
+    "github")` ходит в интернет без всякого импорта httpx. Проверка на
+    импорты такую выгрузку не видит — это нашлось измерением.
+    """
+    source = path.read_text(encoding="utf-8")
+    if "torch.hub" not in source:
+        return
+
+    # Установщику сеть положена: он качает модели.
+    if _module_name(path) in NETWORK_ALLOWLIST:
+        return
+
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "load"):
+            continue
+        for keyword in node.keywords:
+            if keyword.arg == "source" and isinstance(keyword.value, ast.Constant):
+                assert keyword.value.value not in ("github", "url"), (
+                    f"{path.name}: torch.hub.load(source="
+                    f"{keyword.value.value!r}) выходит в сеть. "
+                    "Сеть в ядре запрещена; модель должна быть на диске."
+                )
+
+
+def test_whisper_is_forbidden_to_download():
+    """faster-whisper не должен уметь скачивать веса.
+
+    Найдено измерением: конструктору передавался `download_root`, но не
+    `local_files_only`, и при удалённой модели библиотека молча шла на
+    HuggingFace. Пока модели скачаны установщиком, канал молчит.
+    """
+    source = (PACKAGE / "stt" / "faster_whisper.py").read_text(encoding="utf-8")
+
+    assert "local_files_only=True" in source, (
+        "WhisperModel должен вызываться с local_files_only=True, "
+        "иначе удалённая модель уйдёт скачиваться."
+    )
 
 
 @pytest.mark.parametrize("path", _python_files(), ids=lambda p: p.name)
