@@ -342,6 +342,16 @@ class MainWindow(QWidget):
     def set_input_enabled(self, enabled: bool) -> None:
         self._input.setEnabled(enabled)
 
+    def request_history(self) -> None:
+        """Попросить историю по текущим фильтрам.
+
+        Вызывается при открытии окна: без этого вкладка «История»
+        остаётся пустой до первого нажатия Enter в строке поиска.
+        Пустой раздел, который ждёт действия, читается как «истории
+        нет» — а она есть, просто её не спросили.
+        """
+        self._history.refresh()
+
     def set_history(self, entries, stats=None, summary: str = "") -> None:
         """Показать историю по текущим фильтрам."""
         self._history.set_entries(entries)

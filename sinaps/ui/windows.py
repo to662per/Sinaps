@@ -231,10 +231,14 @@ class SettingsWindow(QWidget):
         autostart_state: Callable[[], bool] | None = None,
         on_autostart: Callable[[bool], bool] | None = None,
         on_mic_changed: Callable[[Any], None] | None = None,
+        cfg_path: str | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._cfg = cfg
+        #: Куда писать. `None` — в путь по умолчанию; трей передаёт
+        #: тот же, что и при чтении, иначе правка уходит не в тот файл.
+        self._cfg_path = cfg_path
         self._on_apply = on_apply
         self._on_autostart = on_autostart
         self._on_mic_changed = on_mic_changed
@@ -453,7 +457,7 @@ class SettingsWindow(QWidget):
         # галочки — худший вид поломки, потому что он заметен только
         # через месяц, когда ассистент ведёт себя не так.
         try:
-            save_config(cfg)
+            save_config(cfg, self._cfg_path)
         except OSError as exc:
             log.warning("Настройки: не удалось записать config.yaml (%s)", exc)
             QMessageBox.warning(

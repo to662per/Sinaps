@@ -235,12 +235,17 @@ def _from_dict(cls: type, data: dict[str, Any]) -> Any:
 
 _lock = threading.RLock()
 _current = SinapsConfig()
+#: Откуда читали в последний раз. Помнит не сам конфиг, а модуль:
+#: `SinapsConfig` — это значения, путь к ним отношения не имеет, а
+#: сохранять надо туда же, откуда читали.
+_current_path = CONFIG_PATH
 
 
 def load_config(path: str | os.PathLike[str] | None = None, *, autostart: bool = True) -> SinapsConfig:
     """Читает YAML (если есть) поверх значений по умолчанию."""
-    global _current
+    global _current, _current_path
     cfg_path = Path(path) if path else CONFIG_PATH
+    _current_path = cfg_path
 
     raw: dict[str, Any] = {}
     if cfg_path.exists():
@@ -265,6 +270,18 @@ def load_config(path: str | os.PathLike[str] | None = None, *, autostart: bool =
 def get_config() -> SinapsConfig:
     with _lock:
         return copy.deepcopy(_current)
+
+
+def config_path() -> Path:
+    """Файл, из которого читали конфигурацию в последний раз.
+
+    Нужен тому, кто правит настройки: `save_config(cfg)` без пути
+    пишет в `CONFIG_PATH`, и при чтении из другого места правка
+    ушла бы не туда. Знание пути принадлежит модулю, а не трею:
+    трей получает уже готовую конфигурацию и о файле ничего не знает.
+    """
+    with _lock:
+        return _current_path
 
 
 def reload_config(path: str | os.PathLike[str] | None = None) -> SinapsConfig:

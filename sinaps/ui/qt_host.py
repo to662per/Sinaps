@@ -32,6 +32,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from ..core.config import save_config
+
+#: Настройки, меняющие движки. Живут в `settings_view`, чтобы окно и
+#: трей смотрели на один список: два перечня разъедутся за месяц.
+from .settings_view import RESTART_MARKERS
+
 log = logging.getLogger(__name__)
 
 #: Сколько ждём готовности ассистента, прежде чем показать трей.
@@ -69,8 +75,14 @@ class QtHost:
 
     def __init__(self, cfg, *, console: bool = False,
                  assembler: Callable[..., Any] | None = None,
-                 no_audio: bool = False) -> None:
+                 no_audio: bool = False,
+                 cfg_path: str | None = None) -> None:
         self.cfg = cfg
+        #: Откуда конфигурацию читали. Без этого пути `save_config(cfg)`
+        #: писала в боевой `data/config.yaml`, даже если читала из
+        #: другого места, — а правка из окна исчезала из файла, который
+        #: человек на самом деле открывает.
+        self.cfg_path = cfg_path
         self.console = console
         self._assembler = assembler
         self._no_audio = no_audio
@@ -448,6 +460,7 @@ class QtHost:
 
         self._fill_settings(self.main_window)
         self._refresh_main_window()
+        self.main_window.request_history()
         self.main_window.show()
         self.main_window.raise_()
 
@@ -576,11 +589,13 @@ class QtHost:
         означал бы два источника правды: «я поменял, а оно не
         применилось» невозможно будет отличить от «я поменял не там».
         """
-        runtime = self._runtime
-        if runtime is None:
-            return
-
-        cfg = runtime.config
+        # Пишем в `self.cfg`, а не в `runtime.config`: конфигурация у
+        # трея своя, и окно обязано править ту, что прочитается при
+        # следующем запуске. Раньше бралась `runtime.config`, и при
+        # незапущенном ассистенте (`runtime is None`) правка просто
+        # исчезала: человек двигал ползунок и не получал ни ошибки,
+        # ни сохранения.
+        cfg = self.cfg
 
         # Путь `stt.model` разбирается вручную: конфигурация — вложенные
         # dataclass'ы, а не словарь, и общего способа задать поле у неё нет.
@@ -603,7 +618,11 @@ class QtHost:
 
         setattr(target, name, value)
         try:
-            cfg.save()
+            # Именно `save_config(cfg)`, а не `cfg.save()`: у
+            # `SinapsConfig` такого метода нет, есть только `dumps()`.
+            # Написал `cfg.save()` по привычке — и получал одну и ту же
+            # ошибку при каждой правке, не замечая, что она повторяется.
+            save_config(cfg, self.cfg_path)
         except Exception as exc:                      # noqa: BLE001
             log.exception("Не удалось сохранить настройку %s", path)
             self._notify("Настройки", f"Сохранить не получилось: {exc}")
@@ -613,22 +632,26 @@ class QtHost:
 
         # Применить на лету то, что можно, и сказать про остальное.
         if path == "tts.test":
-            self._call_async(
-                lambda: runtime.conversation.speak_now("Проверка голоса"))
+            runtime = self._runtime
+            if runtime is not None:
+                self._call_async(
+                    lambda: runtime.conversation.speak_now("Проверка голоса"))
             return
         if path in ("privacy.keep_history_days",):
-            self._store and setattr(self._store, "keep_days", int(value))
+            if self._store is not None:
+                self._store.keep_days = int(value)
             return
 
-        from .main_window import RESTART_MARKERS
-        needs_restart = any(path.startswith(prefix)
-                            for prefix in RESTART_MARKERS)
-        if needs_restart:
+        # Успешное сохранение не показывается: ползунок скорости
+        # голоса шлёт значение на каждое движение мыши, и десять
+        # одинаковых уведомлений подряд учат человека, что уведомления
+        # от этого окна ничего не значат. Показываем только то, что
+        # человек обязан знать: настройку, которая не подействует до
+        # перезапуска.
+        if any(path.startswith(prefix) for prefix in RESTART_MARKERS):
             self._notify(
                 "Настройки",
                 f"{path} = {value}\nПрименится после перезапуска ассистента.")
-        else:
-            self._notify("Настройки", f"{path} = {value}")
 
     def _post_to_window(self, action) -> None:
         """Выполнить действие в Qt-потоке.
@@ -877,6 +900,7 @@ class QtHost:
                 on_apply=self._on_settings_apply,
                 autostart_state=autostart.is_enabled,
                 on_autostart=autostart.set_enabled,
+                cfg_path=self.cfg_path,
             )
         self.settings_window.show()
         self.settings_window.raise_()
@@ -940,7 +964,10 @@ def start_tray_mode(cfg, *, console: bool = False,
         return 1
 
     try:
-        return QtHost(cfg, console=console, no_audio=no_audio).run()
+        from ..core.config import config_path
+
+        return QtHost(cfg, console=console, no_audio=no_audio,
+                      cfg_path=str(config_path())).run()
     except Exception as exc:                        # noqa: BLE001
         log.exception("Интерфейс не запустился")
         print(f"Не удалось запустить интерфейс: {exc}")

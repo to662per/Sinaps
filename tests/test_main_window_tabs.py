@@ -592,6 +592,313 @@ def test_t_show_main_window_reads_config_and_devices(app, monkeypatch):
         "окно без настроек не должно показывать их значения")
 
 
+def test_writing_to_real_config_fails(app):
+    """Запись в боевой конфиг роняет тест.
+
+    Стояло бы на запрете в словах, но слова оказываются слабее кода:
+    тест однажды оставил пользователю скорость голоса 1.3 вместо 1.0,
+    и это всплыло только при `git status` — уже после прогона.
+
+    Проверяется настоящая запись на диск, а не вызов `save_config`:
+    модули держат её прямой ссылкой, и подмена одной функции проходила
+    мимо.
+    """
+    from sinaps.core.config import CONFIG_PATH, SinapsConfig, save_config
+
+    with pytest.raises(AssertionError, match="боевую конфигурацию"):
+        save_config(SinapsConfig(), CONFIG_PATH)
+
+    with pytest.raises(AssertionError, match="боевую конфигурацию"):
+        save_config(SinapsConfig())
+
+
+def test_tray_saving_without_path_is_caught(app, tmp_path):
+    """Трей без пути конфигурации ломает тест, а не тишину.
+
+    Такое случилось по-настоящему: `save_config(cfg)` без пути писал в
+    боевой файл, и правка из окна исчезала из того конфига, который
+    человек на самом деле открывает.
+    """
+    from sinaps.core.config import load_config
+    from sinaps.ui.qt_host import QtHost
+
+    path = tmp_path / "nopath.yaml"
+    path.write_text("tts:\n  speed: 1.0\n", encoding="utf-8")
+
+    host = QtHost.__new__(QtHost)
+    host.cfg = load_config(path, autostart=False)
+    host.cfg_path = None            # трей не знает, откуда читал
+    host._store = None
+    host._runtime = None
+    host.tray = None
+    shown: list = []
+    host._notify = lambda t, b: shown.append((t, b))
+
+    host._on_setting_changed("tts.speed", 1.7)
+
+    # Человеку показывается уведомление, а тесту падает проверка записи
+    # в боевой конфиг. Одно не мешает другому: ошибка сохранения
+    # обязана быть видна, даже если файл недоступен.
+    assert shown and "не получилось" in shown[-1][1], shown
+
+
+def test_setting_is_actually_written_to_file(app, tmp_path):
+    """Правка настройки доезжает до файла конфигурации.
+
+    Раньше здесь стоял `cfg.save()` — метода у `SinapsConfig` нет,
+    есть только `save_config(cfg)`. Ошибка повторялась при каждой
+    правке, но выглядела как «что-то с сохранением», и человек
+    справедливо не мог понять, куда деваются его настройки.
+    """
+    from sinaps.core.config import load_config
+    from sinaps.ui.qt_host import QtHost
+
+    path = tmp_path / "config.yaml"
+    path.write_text("tts:\n  speed: 1.0\n", encoding="utf-8")
+
+    host = QtHost.__new__(QtHost)
+    host.cfg = load_config(path, autostart=False)
+    host.cfg_path = str(path)
+    host.cfg_path = str(path)
+    host._store = None
+    host._runtime = None
+    host.tray = None
+    shown: list[tuple[str, str]] = []
+    host._notify = lambda title, body: shown.append((title, body))
+
+    # Ассистент не запущен. Правка обязана сохраниться и в этом
+    # случае: окно открывают и до старта, и после остановки.
+    host._on_setting_changed("tts.speed", 1.8)
+
+    assert not [s for s in shown if "не получилось" in s[1]], (
+        f"сохранение падало: {shown}")
+
+    reread = load_config(path, autostart=False)
+    assert reread.tts.speed == pytest.approx(1.8), (
+        "настройка не записана на диск")
+
+
+def test_failed_save_is_reported_not_swallowed(app, tmp_path):
+    """Ошибка сохранения видна человеку и в логе.
+
+    Тихий проглот ошибки означал бы, что человек закрывает окно,
+    уверенный, что настроил, — и теряет настройку.
+    """
+    from sinaps.core.config import load_config
+    from sinaps.ui.qt_host import QtHost
+
+    # Свой файл, а не боевой config.yaml: тест, который пишет в
+    # конфигурацию пользователя, однажды оставит ему настройки,
+    # которые никто не просил менять.
+    path = tmp_path / "broken.yaml"
+    path.write_text("tts:\n  speed: 1.0\n", encoding="utf-8")
+
+    host = QtHost.__new__(QtHost)
+    host.cfg = load_config(path, autostart=False)
+    host.cfg_path = str(path)
+    host._store = None
+    host._runtime = None
+    host.tray = None
+    shown: list[tuple[str, str]] = []
+    host._notify = lambda title, body: shown.append((title, body))
+
+    def _boom(*_a, **_kw):
+        raise OSError("диск только для чтения")
+
+    import sinaps.ui.qt_host as qt_host_module
+    original = qt_host_module.save_config
+    qt_host_module.save_config = _boom
+    try:
+        host._on_setting_changed("tts.speed", 1.9)
+    finally:
+        qt_host_module.save_config = original
+
+    assert shown, "ошибка сохранения не показана"
+    assert "не получилось" in shown[-1][1], shown[-1]
+
+
+def test_successful_change_is_not_announced(app, tmp_path):
+    """Успешное сохранение не выскакивает уведомлением.
+
+    Ползунок скорости голоса шлёт значение на каждое движение мыши.
+    Уведомление на каждое значение превращает окно в трей, и человек
+    перестаёт читать то, что показывают срочное.
+    """
+    from sinaps.core.config import load_config
+    from sinaps.ui.qt_host import QtHost
+
+    path = tmp_path / "config.yaml"
+    path.write_text("tts:\n  speed: 1.0\n", encoding="utf-8")
+
+    host = QtHost.__new__(QtHost)
+    host.cfg = load_config(path, autostart=False)
+    host.cfg_path = str(path)
+    host._store = None
+    host._runtime = None
+    host.tray = None
+    shown: list[tuple[str, str]] = []
+    host._notify = lambda title, body: shown.append((title, body))
+
+    host._on_setting_changed("tts.speed", 1.6)
+
+    assert not shown, f"успешное сохранение сообщило о себе: {shown}"
+
+
+def test_restart_setting_still_warns(app, tmp_path):
+    """Настройка с перезапуском предупреждает — это не шум.
+
+    Молча сменить модель распознавания и дать человеку три дня
+    гадать, почему качество не изменилось, — хуже лишнего окна.
+    """
+    from sinaps.core.config import load_config
+    from sinaps.ui.qt_host import QtHost
+
+    path = tmp_path / "config.yaml"
+    path.write_text("stt:\n  model: small\n", encoding="utf-8")
+
+    host = QtHost.__new__(QtHost)
+    host.cfg = load_config(path, autostart=False)
+    host.cfg_path = str(path)
+    host._store = None
+    host._runtime = None
+    host.tray = None
+    shown: list[tuple[str, str]] = []
+    host._notify = lambda title, body: shown.append((title, body))
+
+    host._on_setting_changed("stt.model", "large-v3-turbo")
+
+    assert shown, "смена модели распознавания прошла без предупреждения"
+    assert "перезапуск" in shown[-1][1].lower(), shown[-1]
+
+
+def test_history_asks_for_data_when_window_opens(app, store):
+    """Открытие окна запрашивает историю.
+
+    Вкладка ждала первого нажатия Enter в строке поиска. Пустой
+    список при непустой базе читается как «истории нет».
+    """
+    window = MainWindow()
+    asked: list[dict] = []
+    window.history_query_changed.connect(asked.append)
+
+    window.request_history()
+
+    assert asked, "открытие окна не спросило историю"
+    assert asked[-1]["query"] == ""
+
+
+def test_history_tab_is_not_empty_after_request(app, store):
+    """После запроса история попадает в список."""
+    window = MainWindow()
+    got: list = []
+    window.history_query_changed.connect(
+        lambda f: got.extend(store.history(**f)))
+
+    window.request_history()
+
+    assert len(got) == len(store.history())
+
+
+def test_config_path_remembers_where_it_read(tmp_path):
+    """Модуль помнит, откуда читал конфигурацию.
+
+    Без этого `save_config(cfg)` писал в боевой `data/config.yaml`, даже
+    если читал из другого места, и правка исчезала из файла, который
+    человек на самом деле открывает.
+    """
+    from sinaps.core.config import config_path, load_config
+
+    path = tmp_path / "my.yaml"
+    path.write_text("tts:\n  speed: 1.0\n", encoding="utf-8")
+
+    load_config(path, autostart=False)
+
+    assert config_path() == path
+
+    load_config(autostart=False)   # вернуть боевой путь на место
+
+
+def test_tray_saves_where_config_was_read(app, tmp_path):
+    """Трей пишет в тот файл, который человек открывает.
+
+    Путь передаётся в `QtHost`, а не берётся из воздуха: трей получает
+    готовую конфигурацию и сам не знает, откуда она.
+    """
+    from sinaps.core.config import load_config
+    from sinaps.ui.qt_host import QtHost
+
+    path = tmp_path / "tray.yaml"
+    path.write_text("tts:\n  speed: 1.0\n", encoding="utf-8")
+
+    host = QtHost(load_config(path, autostart=False),
+                  cfg_path=str(path))
+    host._store = None
+    host._runtime = None
+    host.tray = None
+    host._notify = lambda t, b: None
+
+    host._on_setting_changed("tts.speed", 1.7)
+
+    assert load_config(path, autostart=False).tts.speed == pytest.approx(1.7)
+
+
+def test_setting_saved_even_with_runtime_shutdown(app, tmp_path):
+    """Правка сохраняется, даже если рантайм упал.
+
+    Раньше бралась `runtime.config`, и при `runtime is None` правка
+    исчезала: человек двигал ползунок и не получал ни ошибки, ни
+    сохранения. Окно открывают и после сбоя ассистента — там оно
+    тоже должно работать.
+    """
+    from sinaps.core.config import load_config
+    from sinaps.ui.qt_host import QtHost
+
+    path = tmp_path / "dead.yaml"
+    path.write_text("tts:\n  speed: 1.0\n", encoding="utf-8")
+
+    host = QtHost.__new__(QtHost)
+    host.cfg = load_config(path, autostart=False)
+    host.cfg_path = str(path)
+    host._store = None
+    host._runtime = None
+    host.tray = None
+    shown: list = []
+    host._notify = lambda t, b: shown.append((t, b))
+
+    host._on_setting_changed("tts.speed", 1.3)
+
+    assert load_config(path, autostart=False).tts.speed == pytest.approx(1.3), \
+        "правка потерялась при выключенном ассистенте"
+
+
+def test_open_window_loads_history(app, store):
+    """Открытие окна из трея подгружает историю.
+
+    Проверяется именно вызов в `_show_main_window`: тест на сам
+    `request_history` проходит, даже если его никто не зовёт, — а
+    именно это и было: вкладка ждала нажатия Enter.
+    """
+    from sinaps.ui.qt_host import QtHost
+
+    host = QtHost.__new__(QtHost)
+    host.cfg = SinapsConfig()
+    host.cfg_path = None
+    host._store = store
+    host._runtime = None
+    host.tray = None
+    asked: list[dict] = []
+    host._call_async = lambda factory: asked.append({"ok": True})
+
+    # Окно уже создано: `_show_main_window` переиспользует его, а не
+    # создаёт заново. Проверяем именно этот путь — он и есть боевой.
+    host.main_window = MainWindow()
+    host.main_window.history_query_changed.connect(asked.append)
+
+    host._show_main_window()
+
+    assert asked, "окно из трея не спросило историю"
+
+
 def test_missing_value_is_left_alone(app):
     """Отсутствующее значение не заменяется нулём.
 

@@ -270,14 +270,18 @@ def cfg():
     return load_config()
 
 
-def test_settings_window_saves_values(qapp, cfg, tmp_path, monkeypatch):
+def test_settings_window_saves_values(qapp, cfg, tmp_path):
     from sinaps.core.config import load_config
     from sinaps.ui.windows import SettingsWindow
 
     target = tmp_path / "config.yaml"
-    monkeypatch.setattr("sinaps.core.config.CONFIG_PATH", target)
 
-    window = SettingsWindow(cfg, models=["large-v3-turbo"])
+    # Путь передаётся явно. Раньше тест подменял `CONFIG_PATH`, и
+    # сохранение молча уезжало в боевой файл: подмена меняла значение
+    # по умолчанию, а не то, куда писать. Тест проходил, а
+    # конфигурацию пользователя правил.
+    window = SettingsWindow(cfg, models=["large-v3-turbo"],
+                            cfg_path=str(target))
     window._keep_days.setText("45")           # noqa: SLF001
     window._voice.setCurrentText("female_ru")  # noqa: SLF001
     window._save()                            # noqa: SLF001
