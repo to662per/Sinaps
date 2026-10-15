@@ -341,7 +341,7 @@ class SkillRegistry:
             f"опасных: {dangerous}",
             "",
             "  ЭТОТ ФАЙЛ СОЗДАЁТСЯ АВТОМАТИЧЕСКИ из реестра навыков.",
-            "  Перегенерировать:  python -m sinaps commands --out docs\\КОМАНДЫ.md",
+            "  Перегенерировать:  python -m sinaps commands --out docs\\COMMANDS.md",
             "",
             "  Полное имя (intent) — техническое название, по нему можно",
             "  проверить срабатывание:  python -m sinaps try \"фраза\"",

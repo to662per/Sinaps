@@ -1071,7 +1071,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("commands", help="список всех команд ассистента")
     p.add_argument("--out", metavar="ФАЙЛ",
-                   help="сохранить полный справочник в файл (например docs/КОМАНДЫ.md)")
+                   help="сохранить полный справочник в файл (например docs/COMMANDS.md)")
     p.add_argument("--no-patterns", action="store_true",
                    help="в файле не печатать технические шаблоны распознавания")
 
