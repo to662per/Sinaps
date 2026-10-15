@@ -865,6 +865,7 @@ async def _run_interactive_locked(
                 "metrics": lambda _: console.info(runtime.metrics.report()),
                 "history": lambda _: _print_history(console, runtime),
                 "reload": lambda _: _reload(console, runtime),
+                "plugins": lambda a="": _plugins(console, runtime, a),
                 # ВАЖНО: обработчики — это функции, а не их результаты.
                 # `_set_quiet(console, runtime)` без lambda выполнился бы
                 # тут же, при построении словаря, то есть на КАЖДОЙ строке.
@@ -1002,6 +1003,45 @@ def _reload(console: Console, runtime) -> None:  # noqa: ANN001
 def _set_quiet(console: Console, runtime) -> None:  # noqa: ANN001
     console.set_muted(not console.muted)
     runtime.conversation.set_speak_enabled(not console.muted)
+
+
+def _plugins(console: Console, runtime, arg: str = "") -> None:  # noqa: ANN001
+    """Список плагинов и перезагрузка: `/plugins`, `/plugins reload имя`.
+
+    `arg` приходит из `ConsoleCommandRouter` — тот уже разобрал строку.
+    Разбор здесь, а не в роутере: роутер не знает про плагины и не
+    должен.
+    """
+    if arg == "reload":
+        console.info("Укажи плагин: /plugins reload <имя>")
+        return
+    if arg.startswith("reload "):
+        loop = asyncio.get_running_loop()
+        loop.create_task(_reload_plugin(console, runtime, arg[7:].strip()))
+        return
+    if arg and arg != "list":
+        console.info("Не понимаю: /plugins, /plugins list, /plugins reload <имя>")
+        return
+    _list_plugins(console, runtime)
+
+
+def _list_plugins(console: Console, runtime) -> None:  # noqa: ANN001
+    names = runtime.plugin_names()
+    if not names:
+        console.info("Плагины не загружены")
+        return
+    for name in names:
+        console.info(f"  {name}")
+    console.info("Перезагрузка: /plugins reload <имя>")
+
+
+async def _reload_plugin(console: Console, runtime, name: str) -> None:  # noqa: ANN001
+    """Перезагрузка идёт через цикл событий: она ждёт процессы."""
+    console.info(f"Перезагружаю {name}…")
+    if await runtime.reload_plugin(name):
+        console.info(f"Плагин {name} перезагружен")
+    else:
+        console.info(f"Не удалось перезагрузить {name}, подробности в журнале")
 
 
 def _request_stop(stop: asyncio.Future) -> None:

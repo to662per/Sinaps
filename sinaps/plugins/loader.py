@@ -82,6 +82,10 @@ class LoadedPlugin:
     #: Права, которых не хватает: плагин загрузился, но работает не всем.
     withheld: tuple[str, ...] = ()
     network_sealed: bool = True
+    #: Навык-держатель, под которым в реестре лежат команды плагина.
+    #: Нужен для горячей перезагрузки: чтобы команды убрать, надо знать,
+    #: чем их убирать, а по одному списку имён навык не собрать.
+    holder: "Skill | None" = None
 
     @property
     def name(self) -> str:
@@ -702,6 +706,7 @@ async def load_plugin(folder: str | Path, registry: SkillRegistry,
         granted=granted,
         withheld=withheld,
         network_sealed=bool(ready.get("network_sealed", True)),
+        holder=holder,
     )
 
     log.info("Плагин %s %s: %d команд, прав выдано %s",
@@ -713,6 +718,52 @@ async def load_plugin(folder: str | Path, registry: SkillRegistry,
             "но эти возможности будут отказывать.",
             manifest.name, ", ".join(withheld))
     return plugin
+
+
+async def reload_plugin(plugin: LoadedPlugin, folder: str | Path,
+                        registry: SkillRegistry,
+                        bus: "EventBus | None" = None) -> LoadedPlugin:
+    """Перезагрузить плагин на ходу, не трогая ассистент.
+
+    Порядок именно такой: сначала убрать старые команды из реестра,
+    потом закрыть процесс, потом грузить заново. Иначе между «старые
+    команды исчезли» и «новые появились» была бы дыра, в которую
+    пользователь может попасть голосом — и услышать «не знаю такую команду»
+    на команду, которая была секунду назад.
+
+    Бросает `ManifestError` при неудаче. Процесс к этому моменту уже
+    закрыт, а команды из реестра убраны: плагин остаётся выключенным,
+    и это состояние видно, а не спрятано. Следующая попытка — явный
+    вызов `reload_plugin` или перезапуск ассистента.
+    """
+    holder = plugin.holder
+    if holder is not None:
+        registry.remove(holder)
+
+    await plugin.stop(reason="reload")
+    plugin.process = None
+    plugin.holder = None
+
+    fresh = await load_plugin(folder, registry, bus=bus)
+    if not fresh.commands:
+        raise ManifestError(f"{folder}: после перезагрузки нет ни одной команды")
+
+    return fresh
+
+
+def replace_plugin(report: LoadReport, old: LoadedPlugin,
+                   fresh: LoadedPlugin) -> LoadReport:
+    """Заменить плагин в отчёте на свежезагруженный.
+
+    Порядок в отчёте сохраняется: карточка в окне «Плагины» не должна
+    прыгать в конец списка после каждой перезагрузки.
+    """
+    for index, current in enumerate(report.loaded):
+        if current is old or current.name == old.name:
+            report.loaded[index] = fresh
+            return report
+    report.loaded.append(fresh)
+    return report
 
 
 async def load_all(plugins_dir: str | Path, registry: SkillRegistry,
@@ -792,4 +843,6 @@ __all__ = [
     "load_plugin",
     "plugin_stats",
     "reap_idle",
+    "reload_plugin",
+    "replace_plugin",
 ]

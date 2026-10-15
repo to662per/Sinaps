@@ -26,7 +26,8 @@ from .platform.detect import build_platform
 from .skills.engine import SkillEngine, build_default_registry
 from .skills.registry import SkillRegistry
 from .plugins.loader import (
-    IDLE_TIMEOUT_S, load_all, plugin_stats, reap_idle, LoadReport)
+    IDLE_TIMEOUT_S, load_all, plugin_stats, reap_idle, reload_plugin,
+    replace_plugin, LoadReport)
 from .stt.base import STTEngine, load_engine as load_stt
 from .tts.base import TTSEngine, load_engine as load_tts
 from .ui.trigger import ActivationTrigger, Trigger, parse_trigger
@@ -164,6 +165,46 @@ class Runtime:
             self.trigger.stop()
         self.player.cancel()
         await self.stop_plugins()
+
+    async def reload_plugin(self, name: str) -> bool:
+        """Перезагрузить плагин по имени, без перезапуска ассистента.
+
+        Нужно автору плагина на этапе отладки: раньше правка кода
+        требовала перезапуска ассистента целиком, а это минуты.
+
+        Возвращает `False`, если плагина с таким именем нет. Ошибка
+        загрузки не поднимается наружу: плагин остаётся выключенным,
+        причина — в журнале, а ассистент продолжает работать.
+        """
+        if self.plugins is None:
+            return False
+
+        plugin = next((p for p in self.plugins.loaded if p.name == name), None)
+        if plugin is None:
+            log.warning("Перезагрузка: плагин %s не загружен", name)
+            return False
+
+        folder = plugin.process.folder if plugin.process is not None else None
+        if folder is None:
+            log.warning("Перезагрузка: у плагина %s нет папки", name)
+            return False
+
+        try:
+            fresh = await reload_plugin(plugin, folder, self.registry, self.bus)
+        except Exception as exc:  # noqa: BLE001 — чужая папка с чужим кодом
+            log.error("Перезагрузка плагина %s не удалась: %s: %s",
+                      name, type(exc).__name__, exc)
+            return False
+
+        replace_plugin(self.plugins, plugin, fresh)
+        log.info("Плагин %s перезагружен", name)
+        return True
+
+    def plugin_names(self) -> tuple[str, ...]:
+        """Имена загруженных плагинов — для консоли и трея."""
+        if self.plugins is None:
+            return ()
+        return tuple(plugin.name for plugin in self.plugins.loaded)
 
     async def stop_plugins(self) -> None:
         """Остановить фоновую уборку и закрыть процессы плагинов.
