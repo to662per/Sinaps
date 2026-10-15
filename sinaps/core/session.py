@@ -44,7 +44,16 @@ class State(str, enum.Enum):
 #: нет, поэтому заставлять её «притворяться» голосом было бы artificial.
 _ALLOWED: dict[State, set[State]] = {
     State.IDLE: {State.LISTENING, State.THINKING},
-    State.LISTENING: {State.TRANSCRIBING, State.IDLE, State.SPEAKING, State.ERROR},
+    # LISTENING -> THINKING добавлен для ответа на вопрос подтверждения:
+    # вопрос задаётся голосом, человек отвечает голосом прямо во время
+    # прослушивания, и конвейер обрабатывает реплику из LISTENING, а не
+    # из IDLE. Без этого перехода весь диалог падал с InvalidTransition,
+    # и в историю не попадало ничего: человек подтверждал отзыв прав,
+    # ассистент отвечал «Что-то пошло не так», и история оставалась
+    # пустой. Тест на подтверждение это скрывал: сессия в нём всегда
+    # начиналась из IDLE.
+    State.LISTENING: {State.TRANSCRIBING, State.THINKING, State.IDLE,
+                      State.SPEAKING, State.ERROR},
     State.TRANSCRIBING: {State.THINKING, State.IDLE, State.ERROR},
     State.THINKING: {State.ROUTING, State.LISTENING, State.SPEAKING, State.ERROR},
     State.ROUTING: {State.SPEAKING, State.CONFIRMING, State.LISTENING, State.IDLE, State.ERROR},

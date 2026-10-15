@@ -129,6 +129,85 @@ async def test_no_reaches_the_action_denied(pipeline):
     assert any("отменяю" in line.lower() for line in tts.spoken)
 
 
+async def test_answer_while_listening_works(pipeline):
+    """Ответ голосом во время прослушивания не роняет диалог.
+
+    Именно так выглядит живой случай: человек нажал кнопку в трее, а
+    ассистент спросил подтверждение голосом. Сессия в этот момент в
+    состоянии LISTENING, а не IDLE, и переход `listening -> thinking`
+    был запрещён таблицей. Диалог падал целиком, и в историю не
+    попадало ничего — на вопрос «очистить историю» человек отвечал
+    «да», ассистент говорил «Что-то пошло не так», и история оставалась
+    пустой.
+
+    Тест повторяет именно этот порядок состояний.
+    """
+    pipe, responder, tts, guard, session = pipeline
+    done: list[str] = []
+
+    async def action() -> str:
+        done.append("выполнено")
+        return "История очищена"
+
+    # Сессия жива: окно прослушивания открыто.
+    await session.transition(State.LISTENING, reason="test")
+
+    guard.request("Очистить всю историю?", action)
+    await say(pipe, "да")
+
+    assert done == ["выполнено"], (
+        f"действие не выполнено: состояние {session.state.value}, "
+        f"сказано: {tts.spoken}")
+    assert "История очищена" in tts.spoken[-1]
+    assert responder.seen == [], "«да» ушло в разбор команд"
+
+
+async def test_answer_while_listening_reaches_history(pipeline):
+    """Обмен с подтверждением попадает в историю.
+
+    Отдельная проверка от предыдущей: `_remember` вызывается до озвучки,
+    и падение на переходе теряло не только ответ, но и запись.
+    """
+    pipe, _responder, _tts, guard, session = pipeline
+    written: list[tuple] = []
+
+    class _Memory:
+        def add_turn(self, user_text, bot_text, **kw):
+            written.append((user_text, bot_text))
+            return 1
+
+        def add_dialogue(self, role, text, **kw):
+            written.append((role, text))
+            return 1
+
+    pipe.memory = _Memory()
+
+    async def action() -> str:
+        return "История очищена"
+
+    await session.transition(State.LISTENING, reason="test")
+    guard.request("Очистить всю историю?", action)
+    await say(pipe, "да")
+
+    assert written, "обмен с подтверждением не записан в историю"
+    assert any("да" == str(row[1]) for row in written), written
+
+
+async def test_normal_command_while_listening_works(pipeline):
+    """Обычная команда во время прослушивания тоже работает.
+
+    Тот же маршрут состояний, но без вопроса: если сломать переход,
+    пострадал бы весь голосовой ввод, а не только подтверждения.
+    """
+    pipe, responder, tts, _guard, session = pipeline
+
+    await session.transition(State.LISTENING, reason="test")
+    await say(pipe, "открой блокнот")
+
+    assert responder.seen, "реплика не дошла до разбора"
+    assert tts.spoken, "ассистент не ответил"
+
+
 async def test_regular_rephrase_without_question(pipeline):
     """Без вопроса реплика разбирается как обычно.
 
