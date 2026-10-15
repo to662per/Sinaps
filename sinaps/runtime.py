@@ -25,7 +25,8 @@ from .platform.base import PlatformCapabilities
 from .platform.detect import build_platform
 from .skills.engine import SkillEngine, build_default_registry
 from .skills.registry import SkillRegistry
-from .plugins.loader import IDLE_TIMEOUT_S, load_all, reap_idle, LoadReport
+from .plugins.loader import (
+    IDLE_TIMEOUT_S, load_all, plugin_stats, reap_idle, LoadReport)
 from .stt.base import STTEngine, load_engine as load_stt
 from .tts.base import TTSEngine, load_engine as load_tts
 from .ui.trigger import ActivationTrigger, Trigger, parse_trigger
@@ -202,8 +203,24 @@ class Runtime:
             f"  VAD      : {cfg.vad.engine} (порог {cfg.vad.threshold}, тишина {cfg.vad.silence_ms} мс)\n"
             f"  Микрофон : {self.capture_label()}\n"
             f"  Режим    : {network_report()}\n"
+            f"  Плагины  : {self.plugins_label()}\n"
             f"  Сессия   : {self.session.state.value}"
         )
+
+    def plugins_label(self) -> str:
+        """Сколько плагинов в памяти и сколько они весят.
+
+        Показывается и в логе, и здесь из одного источника. Отдельный
+        счётчик в трее со временем разошёлся бы с тем, что написано
+        в журнале, а расхождение в метриках никто не заметит.
+        """
+        if self.plugins is None:
+            return "нет"
+        stats = plugin_stats(self.plugins)
+        if stats.total == 0:
+            return "нет"
+        return (f"{stats.total} всего, живых {stats.alive}, "
+                f"спящих {stats.asleep}, {stats.rss_mb:.1f} МБ")
 
     def capture_label(self) -> str:
         """Что используется для ввода звука."""

@@ -95,6 +95,70 @@ class LoadedPlugin:
             await self.process.stop()
 
 
+@dataclass(frozen=True)
+class PluginStats:
+    """Плагины числом и весом.
+
+    Отдельная сущность, а не пара чисел в логе: трей и будущее окно
+    «Плагины» будут читать те же поля, и пересчитывать всё заново
+    каждый раз — значит разойтись с тем, что показал лог.
+    """
+
+    #: Загружено всего.
+    total: int
+    #: Процессы сейчас живы и ждут вызова.
+    alive: int
+    #: Процессы закрыты по простою.
+    asleep: int
+    #: Суммарная рабочая память живых процессов.
+    rss_mb: float
+
+    def line(self) -> str:
+        """Строка для журнала."""
+        return (f"плагинов {self.total} (живых {self.alive}, "
+                f"спящих {self.asleep}), память {self.rss_mb:.1f} МБ")
+
+
+def plugin_stats(report: LoadReport) -> PluginStats:
+    """Посчитать живые процессы плагинов и их суммарную память.
+
+    Память меряется у живых процессов: у закрытого `psutil` отвечает
+    `NoSuchProcess`, и это не ошибка, а признак того, что процесс
+    действительно закрыт. Помеченный «спящим» плагин в сумму не входит —
+    иначе счётчик памяти врал бы ровно тогда, когда память освободили.
+
+    Раньше эти числа брались на глаз и были завышены в семь раз. Теперь
+    их можно увидеть, а не поверить.
+    """
+    import psutil
+
+    alive = 0
+    asleep = 0
+    rss = 0
+    for plugin in report.loaded:
+        process = plugin.process
+        if process is None or not process.alive:
+            asleep += 1
+            continue
+        alive += 1
+        pid = process.pid
+        if pid is None:
+            continue
+        try:
+            rss += psutil.Process(pid).memory_info().rss
+        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+            # Процесс только что закрылся. Падать из-за этого нельзя:
+            # метрика не должна ронять ассистента.
+            continue
+
+    return PluginStats(
+        total=len(report.loaded),
+        alive=alive,
+        asleep=asleep,
+        rss_mb=rss / (1024 * 1024),
+    )
+
+
 @dataclass
 class LoadReport:
     """Что произошло при попытке загрузить плагины.
@@ -180,6 +244,11 @@ class PluginProcess:
     @property
     def alive(self) -> bool:
         return self._proc is not None and self._proc.returncode is None
+
+    @property
+    def pid(self) -> int | None:
+        """PID дочернего процесса или `None`, если он не запущен."""
+        return self._proc.pid if self.alive and self._proc is not None else None
 
     @property
     def idle_for(self) -> float:
@@ -617,6 +686,7 @@ async def load_all(plugins_dir: str | Path,
                       folder.name, type(exc).__name__, exc)
 
     log.info("Плагины: %s", report.summary())
+    log.info("Плагины в памяти: %s", plugin_stats(report).line())
     return report
 
 
@@ -650,6 +720,7 @@ async def reap_idle(report: LoadReport,
             closed.append(plugin.name)
     if closed:
         log.info("Плагины закрыты по простою: %s", ", ".join(closed))
+        log.info("Плагины в памяти: %s", plugin_stats(report).line())
     return closed
 
 
@@ -657,8 +728,10 @@ __all__ = [
     "LoadedPlugin",
     "LoadReport",
     "PluginProcess",
+    "PluginStats",
     "discover",
     "load_all",
     "load_plugin",
+    "plugin_stats",
     "reap_idle",
 ]

@@ -23,7 +23,7 @@ import types
 import pytest
 
 from sinaps.plugins import approvals
-from sinaps.plugins.loader import LoadReport, load_all
+from sinaps.plugins.loader import LoadReport, load_all, reap_idle
 from sinaps.runtime import Runtime
 from sinaps.skills.registry import SkillRegistry
 
@@ -307,3 +307,48 @@ def test_build_runtime_passes_the_report():
     assert kwargs, (
         "сборщик рантайма не передаёт отчёт о плагинах в Runtime — "
         "уборка и закрытие процессов останутся неприделанными")
+
+
+# --- метрики в интерфейсе ----------------------------------------------------
+
+
+async def test_plugins_label_shows_numbers(tmp_path, registry):
+    """Трей должен показывать, сколько плагинов в памяти и сколько весят.
+
+    Требование ТЗ — «в логе и в трее». Лог проверяется в `test_loader.py`;
+    тут проверяется, что то же самое попадает в то, что видит человек.
+    """
+    make_plugin(tmp_path / "a", name="a")
+    report = await load_all(tmp_path, registry)
+    runtime = bare_runtime(report)
+
+    try:
+        label = runtime.plugins_label()
+        assert "1 всего" in label, label
+        assert "живых 1" in label, label
+        assert "МБ" in label, label
+    finally:
+        await runtime.stop()
+
+
+async def test_plugins_label_after_reap(tmp_path, registry):
+    """После уборки метка показывает спящего плагина и ноль памяти."""
+    make_plugin(tmp_path / "a", name="a")
+    report = await load_all(tmp_path, registry)
+    runtime = bare_runtime(report)
+
+    try:
+        assert await reap_idle(report, 0) == ["a"]
+
+        label = runtime.plugins_label()
+        assert "спящих 1" in label, label
+        assert "0.0 МБ" in label, label
+    finally:
+        await runtime.stop()
+
+
+def test_plugins_label_without_plugins():
+    """Без плагинов метка не должна показывать пустые нули."""
+    runtime = bare_runtime(None)
+
+    assert runtime.plugins_label() == "нет"

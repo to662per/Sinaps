@@ -18,13 +18,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 import textwrap
 
 import pytest
 
 from sinaps.plugins import approvals
-from sinaps.plugins.loader import LoadReport, discover, load_all, load_plugin
+from sinaps.plugins.loader import (
+    LoadReport, PluginStats, discover, load_all, load_plugin, plugin_stats)
 from sinaps.plugins.manifest import ManifestError
 from sinaps.plugins.state import PluginState
 from sinaps.skills.registry import SkillRegistry
@@ -1102,5 +1104,142 @@ async def test_plugin_respawns_after_reap_by_idle(tmp_path, registry):
 
         assert response.speech == "услышал привет"
         assert report.loaded[0].process.alive
+    finally:
+        await report.stop_all()
+
+
+# --- метрики плагинов --------------------------------------------------------
+
+
+async def test_stats_count_alive_and_asleep(tmp_path, registry):
+    """Живые и спящие считаются раздельно."""
+    make_plugin(tmp_path / "a", name="a")
+    make_plugin(tmp_path / "b", name="b")
+
+    report = await load_all(tmp_path, registry)
+    try:
+        stats = plugin_stats(report)
+        assert stats.total == 2
+        assert stats.alive == 2
+        assert stats.asleep == 0
+
+        await reap(report, 0)
+        after = plugin_stats(report)
+        assert after.alive == 0, "после уборки остались живые"
+        assert after.asleep == 2
+        assert after.total == 2, "уборка не должна уменьшать число плагинов"
+    finally:
+        await report.stop_all()
+
+
+async def test_stats_measure_real_memory(tmp_path, registry):
+    """Память не выдумывается, а меряется у живого процесса.
+
+    Раньше число «27 МБ на плагин» было взято на глаз. Тест требует
+    ненулевую и правдоподобную величину, чтобы отказ измерения не
+    прошёл молча: нулевой RSS у живого процесса — это не «экономия»,
+    а сломанный счётчик.
+    """
+    make_plugin(tmp_path / "a", name="a")
+
+    report = await load_all(tmp_path, registry)
+    try:
+        stats = plugin_stats(report)
+        assert stats.rss_mb > 0, "у живого процесса нулевая память"
+        assert stats.rss_mb < 500, (
+            f"подозрительно много для одного раннера: {stats.rss_mb:.1f} МБ")
+    finally:
+        await report.stop_all()
+
+
+async def test_stats_drop_after_reap(tmp_path, registry):
+    """После уборки память в метрике обнуляется.
+
+    Смысл самой уборки — освободить память. Если бы счётчик продолжал
+    показывать RSS закрытого процесса, освобождение было бы видно
+    только в диспетчере задач.
+    """
+    make_plugin(tmp_path / "a", name="a")
+
+    report = await load_all(tmp_path, registry)
+    try:
+        before = plugin_stats(report).rss_mb
+        assert before > 0
+
+        await reap(report, 0)
+
+        assert plugin_stats(report).rss_mb == 0
+    finally:
+        await report.stop_all()
+
+
+async def test_stats_survive_dead_process_mid_measurement(tmp_path, registry):
+    """Процесс, исчезнувший во время замера, не роняет метрику.
+
+    Между `alive` и `psutil.Process(pid)` процесс вполне может умереть —
+    уборка уже отработала, а мы ещё меряем. Ронять ассистента из-за
+    метрики нельзя.
+    """
+    make_plugin(tmp_path / "a", name="a")
+
+    report = await load_all(tmp_path, registry)
+    try:
+        plugin = report.loaded[0]
+        real_pid = plugin.process.pid
+        plugin.process._proc.pid = 0x7FFFFFFF  # заведомо несуществующий
+        try:
+            stats = plugin_stats(report)
+            assert stats.alive == 1, "процесс ещё считается живым"
+            assert stats.rss_mb == 0, "память несуществующего не суммируется"
+        finally:
+            plugin.process._proc.pid = real_pid
+    finally:
+        await report.stop_all()
+
+
+def test_stats_line_is_readable():
+    """Строка для журнала содержит все четыре числа."""
+    stats = PluginStats(total=3, alive=2, asleep=1, rss_mb=12.5)
+    line = stats.line()
+
+    for expected in ("3", "2", "1", "12.5"):
+        assert expected in line, f"в строке нет числа {expected}: {line}"
+
+
+async def test_stats_are_written_to_log(tmp_path, registry, caplog):
+    """После загрузки число плагинов и их память попадают в журнал.
+
+    Требование ТЗ — «в логе и в трее», чтобы это не было загадкой.
+    Посчитать и промолчать — не то же самое, что показать.
+    """
+    make_plugin(tmp_path / "a", name="a")
+
+    with caplog.at_level(logging.INFO, logger="sinaps.plugins"):
+        report = await load_all(tmp_path, registry)
+    try:
+        assert any("Плагины в памяти" in r.message
+                   for r in caplog.records), (
+            "метрика плагинов не попала в журнал")
+    finally:
+        await report.stop_all()
+
+
+async def test_stats_are_logged_after_reap(tmp_path, registry, caplog):
+    """После уборки в журнал пишется обновлённое число.
+
+    Именно тут и видно, что память освободилась: предыдущая строка
+    говорила «живых 1», эта — «живых 0».
+    """
+    make_plugin(tmp_path / "a", name="a")
+
+    report = await load_all(tmp_path, registry)
+    try:
+        with caplog.at_level(logging.INFO, logger="sinaps.plugins"):
+            await reap(report, 0)
+
+        lines = [r.message for r in caplog.records
+                 if "Плагины в памяти" in r.message]
+        assert lines, "уборка не отчиталась о памяти"
+        assert "живых 0" in lines[-1], lines[-1]
     finally:
         await report.stop_all()
