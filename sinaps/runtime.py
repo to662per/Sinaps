@@ -181,7 +181,10 @@ class Runtime:
                 pass
             self._reaper = None
         if self.plugins is not None:
-            await self.plugins.stop_all()
+            # `reason="stop"`: плагин погашен нарочно, а не уснул по
+            # простоям. По событию подписчик поймёт, что это конец
+            # сеанса, а не освобождение памяти посреди работы.
+            await self.plugins.stop_all(reason="stop")
 
     def describe(self) -> str:
         """Человекочитаемое состояние — для стартового экрана и трея."""
@@ -468,7 +471,7 @@ async def build_skills_runtime(
     # --- загрузка плагинов ---
     # Файл runtime.py лежит в sinaps/, корень проекта — parents[1]
     plugins_dir = Path(__file__).resolve().parents[1] / "plugins"
-    load_report: LoadReport = await load_all(plugins_dir, registry)
+    load_report: LoadReport = await load_all(plugins_dir, registry, bus=bus)
     log.info("Плагины: %s", load_report.summary())
     for folder, reason in load_report.failed:
         log.warning("Плагин %s не загружен: %s", folder, reason)

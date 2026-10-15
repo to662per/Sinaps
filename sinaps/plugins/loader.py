@@ -45,6 +45,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
+from ..core.bus import EventBus, EventType
 from ..skills.base import IntentSpec, Response, Skill, SlotSpec
 from ..skills.registry import SkillRegistry
 from .manifest import (DEFAULT_TIMEOUT_S, MAX_TIMEOUT_S, Manifest,
@@ -90,9 +91,9 @@ class LoadedPlugin:
     def permissions(self) -> tuple[str, ...]:
         return self.manifest.permissions
 
-    async def stop(self) -> None:
+    async def stop(self, reason: str = "stop") -> None:
         if self.process is not None:
-            await self.process.stop()
+            await self.process.stop(reason)
 
 
 @dataclass(frozen=True)
@@ -185,11 +186,11 @@ class LoadReport:
             parts.append(f"с ошибкой {len(self.failed)}")
         return "; ".join(parts) or "плагинов не найдено"
 
-    async def stop_all(self) -> None:
+    async def stop_all(self, reason: str = "stop") -> None:
         """Закрыть все дочерние процессы. Вызывается при остановке."""
         for plugin in self.loaded:
             try:
-                await plugin.stop()
+                await plugin.stop(reason)
             except Exception:  # noqa: BLE001 — процесс уже мог умереть
                 pass
 
@@ -220,11 +221,20 @@ class PluginProcess:
     """
 
     def __init__(self, folder: Path, manifest: Manifest,
-                 granted: Sequence[str] = ()) -> None:
+                 granted: Sequence[str] = (),
+                 bus: "EventBus | None" = None) -> None:
         self.folder = folder
         self.manifest = manifest
         self.granted = tuple(granted)
+        #: Шина для событий жизненного цикла. Необязательна: загрузчик
+        #: используется и в тестах, где события никому не нужны, а
+        #: подставлять заглушку в каждый вызов — лишнее.
+        self.bus = bus
         self._proc: Any = None
+        #: Поднимался ли плагин хоть раз. От этого зависит, слышать ли
+        #: подписчикам о неудачном пробуждении: первая загрузка и повторная
+        #: после сна — разные события для человека.
+        self._woke_before = False
         self._next_id = 0
         self._last_used = 0.0
         #: Идёт ли сейчас обмен с ядром. Простоя недостаточно, чтобы
@@ -250,6 +260,23 @@ class PluginProcess:
         """PID дочернего процесса или `None`, если он не запущен."""
         return self._proc.pid if self.alive and self._proc is not None else None
 
+    async def _emit(self, event: EventType, **payload: Any) -> None:
+        """Отправить событие жизненного цикла, если шина есть.
+
+        Подписчикам (трей, а в Beta 1.1 — окно «Плагины») нужно знать,
+        что плагин поднялся или уснул: иначе состояние «спит» пришлось бы
+        угадывать опросом процессов.
+
+        Ошибка отправки не должна мешать: событие — это рассказ о том,
+        что произошло, а не часть самого происходящего.
+        """
+        if self.bus is None:
+            return
+        try:
+            await self.bus.emit(event, plugin=self.manifest.name, **payload)
+        except Exception:  # noqa: BLE001 — подписчик не должен ронять плагин
+            log.debug("Событие %s не доставлено", event.value, exc_info=True)
+
     @property
     def idle_for(self) -> float:
         if self._proc is None:
@@ -260,6 +287,8 @@ class PluginProcess:
         """Поднять процесс и получить описание команд."""
         if self.alive and self.ready:
             return self.ready
+
+        self._woke_before = True
 
         from .protocol import (OP_HELLO, OP_READY, ProtocolError,
                                read_message_async, write_message_async)
@@ -294,7 +323,15 @@ class PluginProcess:
             })
             message = await asyncio.wait_for(
                 read_message_async(self._proc.stdout), MAX_TIMEOUT_S)
-        except (asyncio.TimeoutError, ProtocolError, asyncio.IncompleteReadError) as exc:
+        except (asyncio.TimeoutError, ProtocolError,
+                asyncio.IncompleteReadError) as exc:
+            # Плагин, который уже работал и не смог снова подняться, —
+            # это пробуждение, а не первая загрузка. Разница видна
+            # человеку: в одном случае сбой при старте ассистента, в
+            # другом посреди работы, и ждать придётся не перезапуска.
+            if self._woke_before:
+                await self._emit(EventType.PLUGIN_WAKE_FAILED,
+                                 error=f"{type(exc).__name__}: {exc}")
             await self.stop()
             raise ManifestError(
                 f"{self.folder}: плагин не ответил — {type(exc).__name__}: {exc}"
@@ -308,6 +345,9 @@ class PluginProcess:
                 log.error(
                     "Плагин %s: сеть закрыть не удалось, запрет не держит",
                     self.manifest.name)
+            await self._emit(
+                EventType.PLUGIN_LOADED,
+                skills=len(self.ready.get("skills", [])))
             return message
 
         await self.stop()
@@ -454,14 +494,26 @@ class PluginProcess:
             log.warning("Плагин %s: ответ на возможность не доставлен — %s",
                         self.manifest.name, exc)
 
-    async def stop(self) -> None:
-        """Закрыть процесс. Молчаливый провал здесь — норма."""
+    async def stop(self, reason: str = "stop") -> None:
+        """Закрыть процесс. Молчаливый провал здесь — норма.
+
+        `reason` попадает в событие `PLUGIN_UNLOADED`: «idle» — уснул по
+        простоям, «stop» — погасили нарочно. Разница важна подписчику:
+        по ней видно, что плагин освобождал память сам или его закрыли
+        при остановке ассистента.
+
+        Событие отправляется один раз на реально живший процесс: повторный
+        `stop()` и остановка уже мёртвого процесса событий не порождают,
+        иначе счётчик засыпаний в окне разъезжался бы с реальностью.
+        """
         from .protocol import OP_STOP, ProtocolError, write_message_async
 
         proc, self._proc = self._proc, None
         self.ready = {}
         if proc is None or proc.returncode is not None:
             return
+
+        await self._emit(EventType.PLUGIN_UNLOADED, reason=reason)
 
         try:
             await asyncio.wait_for(
@@ -599,7 +651,8 @@ def _build_specs(process: PluginProcess, ready: dict[str, Any],
 
 async def load_plugin(folder: str | Path, registry: SkillRegistry,
                       taken_names: set[str] | None = None,
-                      *, grantor=None) -> LoadedPlugin:
+                      *, grantor=None,
+                      bus: "EventBus | None" = None) -> LoadedPlugin:
     """Загрузить один плагин.
 
     Бросает `ManifestError` при любой проблеме — вызывающий решает, что
@@ -626,7 +679,7 @@ async def load_plugin(folder: str | Path, registry: SkillRegistry,
                   or DEFAULT_TIMEOUT_S)
     timeout = max(1, min(timeout, MAX_TIMEOUT_S))
 
-    process = PluginProcess(path, manifest, granted)
+    process = PluginProcess(path, manifest, granted, bus=bus)
     ready = await process.start()
 
     specs = _build_specs(process, ready, manifest.name, timeout,
@@ -662,13 +715,16 @@ async def load_plugin(folder: str | Path, registry: SkillRegistry,
     return plugin
 
 
-async def load_all(plugins_dir: str | Path,
-                   registry: SkillRegistry) -> LoadReport:
+async def load_all(plugins_dir: str | Path, registry: SkillRegistry,
+                   bus: "EventBus | None" = None) -> LoadReport:
     """Загрузить все плагины из папки.
 
     Ни одно исключение отсюда не выходит: неудачный плагин — это запись
     в отчёте, а не падение. Ассистент должен работать с теми плагинами,
     которые удалось, и сказать, какие не загрузились и почему.
+
+    `bus` необязательна и передаётся плагинам, чтобы те сами сообщали о
+    своём подъёме. Без неё всё работает, просто никто не узнает.
     """
     report = LoadReport()
     taken: set[str] = set()
@@ -676,7 +732,7 @@ async def load_all(plugins_dir: str | Path,
     for folder in discover(plugins_dir):
         try:
             report.loaded.append(
-                await load_plugin(folder, registry, taken))
+                await load_plugin(folder, registry, taken, bus=bus))
         except ManifestError as exc:
             report.failed.append((folder.name, str(exc)))
             log.error("Плагин %s не загружен: %s", folder.name, exc)
@@ -716,7 +772,9 @@ async def reap_idle(report: LoadReport,
         if process is None or not process.alive or process.busy:
             continue
         if process.idle_for >= idle_s:
-            await process.stop()
+            # `reason="idle"`: подписчик отличит плагин, который сам
+            # освободил память, от погашенного при остановке ассистента.
+            await process.stop(reason="idle")
             closed.append(plugin.name)
     if closed:
         log.info("Плагины закрыты по простою: %s", ", ".join(closed))

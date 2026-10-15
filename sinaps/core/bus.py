@@ -63,7 +63,18 @@ class EventType(str, enum.Enum):
     TTS_FINISHED = "tts_finished"
     BARGE_IN = "barge_in"
 
-    # Служебное
+    # Плагины
+    #: Плагин поднялся: процесс создан, команды в реестре.
+    PLUGIN_LOADED = "plugin_loaded"
+    #: Плагин уснул: процесс закрыт по простою либо при остановке.
+    #: `reason` — «idle» или «stop»: по нему видно, что произошло —
+    #: уснул сам или его погасили.
+    PLUGIN_UNLOADED = "plugin_unloaded"
+    #: Плагин не смог проснуться после засыпания. `error` — причина;
+    #: процесс закрыт, следующий запрос попробует снова.
+    PLUGIN_WAKE_FAILED = "plugin_wake_failed"
+
+    # Служебные
     ERROR = "error"
     METRIC = "metric"
 
