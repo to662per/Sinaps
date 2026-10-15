@@ -25,7 +25,7 @@ from .platform.base import PlatformCapabilities
 from .platform.detect import build_platform
 from .skills.engine import SkillEngine, build_default_registry
 from .skills.registry import SkillRegistry
-from .plugins.loader import load_all, LoadReport
+from .plugins.loader import IDLE_TIMEOUT_S, load_all, reap_idle, LoadReport
 from .stt.base import STTEngine, load_engine as load_stt
 from .tts.base import TTSEngine, load_engine as load_tts
 from .ui.trigger import ActivationTrigger, Trigger, parse_trigger
@@ -50,6 +50,16 @@ class Runtime:
     registry: SkillRegistry | None = None
     platform: "PlatformCapabilities | None" = None
     trigger: "ActivationTrigger | None" = None
+
+    #: Что произошло при загрузке плагинов. Раньше отчёт был локальной
+    #: переменной в `build_skills_runtime` и терялся на выходе из функции:
+    #: `reap_idle` и `stop_all` были написаны, покрыты тестами на
+    #: загрузчике — и ни разу не вызваны из приложения. Держать отчёт
+    #: здесь — единственный способ до них добраться.
+    plugins: "LoadReport | None" = None
+
+    #: Фоновая задача, закрывающая простоящие процессы плагинов.
+    _reaper: asyncio.Task | None = None
 
     #: Текст проблемы с перехватом клавиш/мыши, если он не заработал.
     trigger_error: str | None = None
@@ -82,6 +92,45 @@ class Runtime:
             # Без микрофона ждать незачем: GIL никому не мешает.
             self.start_background_warmup()
 
+        self._start_plugin_reaper()
+
+    def _start_plugin_reaper(self) -> None:
+        """Поднять фоновое закрытие простоящих плагинов.
+
+        Отдельная задача, а не вызов после каждой реплики: уборка нужна
+        именно тогда, когда никто не говорит. Проверять простой только
+        после очередного запроса — значит не убирать никогда, потому что
+        простой и означает отсутствие запросов.
+        """
+        if self.plugins is None or not self.plugins.loaded:
+            return
+        if self._reaper is not None and not self._reaper.done():
+            # Повторный `start()` не должен плодить вторую уборку:
+            # старая задача осталась бы жить и гасилась бы только при
+            # остановке — а её в `self._reaper` уже не было бы.
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._reaper = loop.create_task(self._reap_idle_forever())
+
+    async def _reap_idle_forever(self) -> None:
+        """Шаг уборки повторяется, пока задача не отменена."""
+        # Шаг вчетверо меньше порога: иначе плагин, которым пользовались
+        # в момент X, закрылся бы не раньше чем через 240 с — вдвое
+        # дольше объявленного. Тело шага — сравнение одного float.
+        tick = max(1.0, IDLE_TIMEOUT_S / 4)
+        while True:
+            await asyncio.sleep(tick)
+            try:
+                if self.plugins is not None:
+                    await reap_idle(self.plugins)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 — уборка не должна ронять ассистента
+                log.warning("Уборка плагинов не удалась", exc_info=True)
+
     async def warmup_models(self) -> None:
         """Дождаться готовности моделей.
 
@@ -113,6 +162,25 @@ class Runtime:
         if self.trigger is not None:
             self.trigger.stop()
         self.player.cancel()
+        await self.stop_plugins()
+
+    async def stop_plugins(self) -> None:
+        """Остановить фоновую уборку и закрыть процессы плагинов.
+
+        Порядок важен: уборку гасим до закрытия процессов, иначе она
+        успеет сработать на уже остановленном ассистенте. Отменённую
+        задачу обязательно ждём — иначе на выходе будет «Task was
+        destroyed but it is pending».
+        """
+        if self._reaper is not None:
+            self._reaper.cancel()
+            try:
+                await self._reaper
+            except asyncio.CancelledError:
+                pass
+            self._reaper = None
+        if self.plugins is not None:
+            await self.plugins.stop_all()
 
     def describe(self) -> str:
         """Человекочитаемое состояние — для стартового экрана и трея."""
@@ -438,6 +506,7 @@ async def build_skills_runtime(
         capture=capture, player=player, stt=stt, tts=tts,
         listener=listener, conversation=conversation,
         registry=registry, platform=platform, trigger=trigger,
+        plugins=load_report,
     )
 
 

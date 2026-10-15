@@ -58,10 +58,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 #: Сколько процесс молчит перед тем, как его закрыть.
 #:
-#: Ребёнок стоит 27 МБ. По одному на каждый плагин при десятке плагинов
-#: это 270 МБ, которые никто не просил. Замерено на живой машине, а не
-#: оценено. Простой закрывает процесс, следующая команда поднимает его
-#: заново за четверть секунды.
+#: Замерено на живой машине, а не оценено: ребёнок стоит 4 МБ рабочей
+#: памяти — и столько же на настоящем плагине погоды, не только на пустом
+#: тестовом. Десять плагинов — это 40 МБ, которые никто не просил.
+#: Подъём заново — 0.14 с.
+#:
+#: Раньше здесь стояло 27 МБ и «четверть секунды». Оба числа были взяты
+#: на глаз и завышали цену уборки в семь раз: она выглядела дороже, чем
+#: на самом деле стоит.
 IDLE_TIMEOUT_S = 120
 
 
@@ -159,6 +163,10 @@ class PluginProcess:
         self._proc: Any = None
         self._next_id = 0
         self._last_used = 0.0
+        #: Идёт ли сейчас обмен с ядром. Простоя недостаточно, чтобы
+        #: убирать процесс во время вызова: `_last_used` обновляется в
+        #: конце вызова, и весь разговор с плагином «стареет».
+        self.busy = False
         self.ready: dict[str, Any] = {}
         # Состояние привязано к имени плагина, а не к папке: переименовать
         # папку не значит начать с нуля, и два плагина с разными именами
@@ -258,72 +266,85 @@ class PluginProcess:
         self._next_id += 1
         request_id = self._next_id
 
-        await write_message_async(self._proc.stdin, {
-            "op": "call",
-            "id": request_id,
-            "command": command,
-            "ctx": ctx,
-            "slots": slots or {},
-        })
-
-        # Пока идёт обработчик, ребёнок может позвать возможность ядра:
-        # прочитать ключ состояния, записать, спросить список. Поэтому
-        # читаем не один кадр, а цикл — и каждый промежуточный кадр
-        # выполняем и отвечаем. Первая версия читала один кадр и
-        # принимала его за ответ: первый же `ctx.state.get` ломал бы
-        # разговор ошибкой «пришёл ответ не на тот вызов».
-        deadline = asyncio.get_running_loop().time() + timeout
+        # На всё время обмена процесс считается занятым, и уборщик его не
+        # трогает. Одной проверки по времени не хватило бы: плагину
+        # разрешено работать `MAX_TIMEOUT_S` (300 с), а простой закрывают
+        # после 120 — легитимный долгий вызов выглядел бы как простой и
+        # был убит посреди работы. `_last_used` обновляется в конце
+        # вызова, поэтому весь разговор с плагином «стареет».
+        self.busy = True
         try:
-            while True:
-                remaining = deadline - asyncio.get_running_loop().time()
-                if remaining <= 0:
-                    raise asyncio.TimeoutError
-                message = await asyncio.wait_for(
-                    read_message_async(self._proc.stdout), remaining)
+            await write_message_async(self._proc.stdin, {
+                "op": "call",
+                "id": request_id,
+                "command": command,
+                "ctx": ctx,
+                "slots": slots or {},
+            })
 
-                if message.get("op") == OP_CAP:
-                    await self._serve_capability(message)
-                    continue
-                break
+            # Пока идёт обработчик, ребёнок может позвать возможность ядра:
+            # прочитать ключ состояния, записать, спросить список. Поэтому
+            # читаем не один кадр, а цикл — и каждый промежуточный кадр
+            # выполняем и отвечаем. Первая версия читала один кадр и
+            # принимала его за ответ: первый же `ctx.state.get` ломал бы
+            # разговор ошибкой «пришёл ответ не на тот вызов».
+            deadline = asyncio.get_running_loop().time() + timeout
+            try:
+                while True:
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        raise asyncio.TimeoutError
+                    message = await asyncio.wait_for(
+                        read_message_async(self._proc.stdout), remaining)
 
-        except asyncio.TimeoutError as exc:
-            await self.stop()
+                    if message.get("op") == OP_CAP:
+                        await self._serve_capability(message)
+                        continue
+                    break
+
+            except asyncio.TimeoutError as exc:
+                await self.stop()
+                from ..core.errors import PluginError
+
+                raise PluginError(
+                    f"Плагин «{self.manifest.name}» не ответил за {timeout} с. "
+                    "Процесс закрыт, плагин будет запущен заново.",
+                    speech=f"Плагин «{self.manifest.name}» завис и был остановлен",
+                ) from exc
+            except (ProtocolError, asyncio.IncompleteReadError) as exc:
+                await self.stop()
+                from ..core.errors import PluginError
+
+                raise PluginError(
+                    f"Плагин «{self.manifest.name}»: связь нарушена — {exc}",
+                    speech=f"Плагин «{self.manifest.name}» оборвался",
+                ) from exc
+
+            self._last_used = asyncio.get_running_loop().time()
+
+            if message.get("id") != request_id:
+                await self.stop()
+                from ..core.errors import PluginError
+
+                raise PluginError(
+                    f"Плагин «{self.manifest.name}»: пришёл ответ "
+                    "не на тот вызов",
+                    speech="Что-то пошло не так с плагином")
+
+            if message.get("op") == OP_RESULT:
+                return _response_from(message.get("response") or {})
+
             from ..core.errors import PluginError
 
             raise PluginError(
-                f"Плагин «{self.manifest.name}» не ответил за {timeout} с. "
-                "Процесс закрыт, плагин будет запущен заново.",
-                speech=f"Плагин «{self.manifest.name}» завис и был остановлен",
-            ) from exc
-        except (ProtocolError, asyncio.IncompleteReadError) as exc:
-            await self.stop()
-            from ..core.errors import PluginError
-
-            raise PluginError(
-                f"Плагин «{self.manifest.name}»: связь нарушена — {exc}",
-                speech=f"Плагин «{self.manifest.name}» оборвался",
-            ) from exc
-
-        self._last_used = asyncio.get_running_loop().time()
-
-        if message.get("id") != request_id:
-            await self.stop()
-            from ..core.errors import PluginError
-
-            raise PluginError(
-                f"Плагин «{self.manifest.name}»: пришёл ответ не на тот вызов",
-                speech="Что-то пошло не так с плагином")
-
-        if message.get("op") == OP_RESULT:
-            return _response_from(message.get("response") or {})
-
-        from ..core.errors import PluginError
-
-        raise PluginError(
-            f"Плагин «{self.manifest.name}»: "
-            f"{message.get('message', 'неизвестная ошибка')}",
-            speech=message.get("speech")
-            or f"Плагин «{self.manifest.name}» не сработал")
+                f"Плагин «{self.manifest.name}»: "
+                f"{message.get('message', 'неизвестная ошибка')}",
+                speech=message.get("speech")
+                or f"Плагин «{self.manifest.name}» не сработал")
+        finally:
+            # Без `finally` флаг залип бы навсегда после обрыва записи:
+            # процесс считался бы занятым и его больше никто не убрал бы.
+            self.busy = False
 
     async def _serve_capability(self, message: dict[str, Any]) -> None:
         """Выполнить просьбу плагина и ответить.
@@ -599,18 +620,30 @@ async def load_all(plugins_dir: str | Path,
     return report
 
 
-async def reap_idle(report: LoadReport, idle_s: float = IDLE_TIMEOUT_S
-                     ) -> list[str]:
+async def reap_idle(report: LoadReport,
+                     idle_s: float | None = IDLE_TIMEOUT_S) -> list[str]:
     """Закрыть процессы, которые давно молчат.
 
-    Память измерена: ребёнок стоит 27 МБ. Держать их всех ради
-    вероятности, что кто-то позовёт, — расточительство; поднять заново
-    стоит четверть секунды.
+    Память измерена: ребёнок стоит 4 МБ, подъём заново — 0.14 с.
+    Держать процессы ради вероятности, что кто-то позовёт, —
+    расточительство.
+
+    `idle_s=None` означает «не убирать никогда» — выключатель для того,
+    кому +0.25 с на следующий запрос мешает больше, чем память.
+
+    Ноль порогом не является и убирает всё: `idle_for >= 0` верно всегда.
+    Тесты этим пользуются намеренно.
+
+    Занятые процессы пропускаются: уборка посреди вызова оборвала бы
+    разговор с плагином, которому ещё не истек собственный таймаут.
     """
+    if idle_s is None:
+        return []
+
     closed = []
     for plugin in report.loaded:
         process = plugin.process
-        if process is None or not process.alive:
+        if process is None or not process.alive or process.busy:
             continue
         if process.idle_for >= idle_s:
             await process.stop()

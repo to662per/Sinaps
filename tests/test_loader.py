@@ -962,7 +962,7 @@ async def test_stop_all_closes_processes(tmp_path, registry):
 
 
 async def test_reap_idle_closes_silent_processes(tmp_path, registry):
-    """Простоявший процесс закрывается: ребёнок стоит 27 МБ."""
+    """Простоявший процесс закрывается: ребёнок стоит 4 МБ."""
     make_plugin(tmp_path / "a", name="a")
 
     report = await load_all(tmp_path, registry)
@@ -994,3 +994,113 @@ async def test_call_after_idle_reap_starts_again(tmp_path, registry):
         assert plugin.process.alive
     finally:
         await plugin.stop()
+
+
+# --- уборка простоя ----------------------------------------------------------
+
+
+async def test_busy_plugin_is_not_reaped(tmp_path, registry):
+    """Занятый процесс уборка не трогает.
+
+    Плагину разрешено работать `MAX_TIMEOUT_S` (300 с), а простой закрывают
+    после 120. Одной проверки по времени не хватило бы: долгий вызов
+    «стареет» всё время работы и был бы убит посреди разговора.
+    """
+    make_plugin(tmp_path / "a", name="a")
+
+    report = await load_all(tmp_path, registry)
+    try:
+        report.loaded[0].process.busy = True
+
+        assert await reap(report, 0) == [], "занятый процесс убран"
+        assert report.loaded[0].process.alive
+
+        report.loaded[0].process.busy = False
+        assert await reap(report, 0) == ["a"], "свободный процесс не убран"
+    finally:
+        await report.stop_all()
+
+
+async def test_busy_flag_cleared_after_call(tmp_path, registry):
+    """Флаг занятости не залипает после вызова.
+
+    Залипший флаг означал бы, что процесс больше никогда не уберут: он
+    навсегда остался бы «занятым» и память не освободилась бы.
+    """
+    make_plugin(tmp_path / "a", name="a")
+
+    report = await load_all(tmp_path, registry)
+    try:
+        await find(registry, "a.get.now").handler(FakeCtx(), {})
+
+        assert not report.loaded[0].process.busy, "флаг занятости залип"
+    finally:
+        await report.stop_all()
+
+
+async def test_busy_flag_cleared_after_broken_call(tmp_path, registry):
+    """Флаг снимается и когда вызов упал.
+
+    Иначе плагин, который один раз ответил не тем, больше не убирался бы
+    никогда — молча, и без единой записи в журнал.
+    """
+    body = """\
+        from sinaps.plugins.api import Response, Skill
+
+        async def handle(ctx, slots):
+            raise ValueError("плагин сломался")
+
+        def register(registry):
+            skill = Skill("get")
+            skill.command("now", handle, patterns=[r"^погода$"])
+            registry.add(skill)
+            return skill
+        """
+    make_plugin(tmp_path / "boom", name="boom", body=body)
+
+    report = await load_all(tmp_path, registry)
+    try:
+        with pytest.raises(Exception):
+            await find(registry, "boom.get.now").handler(FakeCtx(), {})
+
+        assert not report.loaded[0].process.busy, "флаг занятости залип"
+    finally:
+        await report.stop_all()
+
+
+async def test_reap_idle_none_keeps_everything(tmp_path, registry):
+    """`None` — выключатель: не убирать ничего.
+
+    Нужен тем, кому +0.25 с на следующий запрос дороже памяти.
+    """
+    make_plugin(tmp_path / "a", name="a")
+
+    report = await load_all(tmp_path, registry)
+    try:
+        assert await reap(report, None) == []
+        assert report.loaded[0].process.alive
+    finally:
+        await report.stop_all()
+
+
+async def test_plugin_respawns_after_reap_by_idle(tmp_path, registry):
+    """Убранный уборкой плагин поднимается и отвечает.
+
+    Путь целиком: уборка по простою → следующий запрос → новый процесс →
+    верный ответ. Раньше проверялось только ручное `stop()`, а уборку в
+    приложении никто не вызывал — и «работает после перезапуска» ничего
+    не значило.
+    """
+    make_plugin(tmp_path / "a", name="a")
+
+    report = await load_all(tmp_path, registry)
+    try:
+        assert await reap(report, 0) == ["a"]
+        assert not report.loaded[0].process.alive
+
+        response = await find(registry, "a.get.now").handler(FakeCtx(), {})
+
+        assert response.speech == "услышал привет"
+        assert report.loaded[0].process.alive
+    finally:
+        await report.stop_all()
