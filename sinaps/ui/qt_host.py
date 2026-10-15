@@ -285,9 +285,17 @@ class QtHost:
             # из этого потока нельзя — Qt к этому не готов.
             bridge.panel_requested.emit()
 
+        async def _on_mic(event) -> None:
+            # Микрофон появился после старта. Без сообщения человек
+            # не поймёт, почему ассистент, который полминуты назад был
+            # немым, заработал, — и решит, что это случайность.
+            self._notify("Sinaps", "Микрофон подключён — слушаю")
+            await self._report_state()
+
         bus.on("state_changed")(_on_state)
         bus.on("panel_requested")(_on_panel)
         bus.on("error")(_on_error)
+        bus.on("microphone_attached")(_on_mic)
 
     async def _report_state(self) -> None:
         """Отправляет в трей полное состояние (пауза, озвучка, счётчик)."""

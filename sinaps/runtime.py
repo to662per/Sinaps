@@ -39,6 +39,12 @@ from .ui.trigger import ActivationTrigger, Trigger, parse_trigger
 
 log = logging.getLogger(__name__)
 
+#: Как часто спрашивать Portaudio, появился ли микрофон. Секунда — с
+#: запасом: человек подключает наушники и ждёт отклика, а не считает
+#: миллисекунды. Чаще опрашивать незачем, перечисление устройств не
+#: бесплатное, а реже — ощутимая задержка.
+MIC_WATCH_INTERVAL_S = 1.0
+
 
 @dataclass
 class Runtime:
@@ -67,6 +73,9 @@ class Runtime:
 
     #: Фоновая задача, закрывающая простоящие процессы плагинов.
     _reaper: asyncio.Task | None = None
+
+    #: Задача, ждущая микрофон, если его не было при старте.
+    _mic_watcher: asyncio.Task | None = None
 
     #: Плагины, выключенные пользователем. Их команды убраны из
     #: реестра, поэтому перезагрузка их не запустит.
@@ -114,6 +123,10 @@ class Runtime:
         else:
             # Без микрофона ждать незачем: GIL никому не мешает.
             self.start_background_warmup()
+            # ...но микрофон может появиться через минуту. Молчащий
+            # ассистент без объяснения — худший вариант, поэтому ждём
+            # подключения и поднимаем контур сами.
+            self._start_mic_watcher()
 
         self._start_plugin_reaper()
 
@@ -180,12 +193,142 @@ class Runtime:
         loop.create_task(self.warmup_models())
 
     async def stop(self) -> None:
+        if self._mic_watcher is not None and not self._mic_watcher.done():
+            self._mic_watcher.cancel()
+            try:
+                await self._mic_watcher
+            except asyncio.CancelledError:
+                pass
+            self._mic_watcher = None
         if self.listener is not None:
             await self.listener.stop()
         if self.trigger is not None:
             self.trigger.stop()
         self.player.cancel()
         await self.stop_plugins()
+
+    # --- микрофон, появившийся позже ---------------------------------------
+
+    def _start_mic_watcher(self) -> None:
+        """Следить за появлением микрофона, если его не было при старте.
+
+        Решение «микрофона нет» принималось один раз и на весь сеанс:
+        `build_skills_runtime(with_audio=False)` не собирал контур
+        прослушивания, и подключение микрофона уже ничего не меняло —
+        ассистент молчал до перезапуска. Люди подключают наушники с
+        микрофоном через минуту после запуска, и «работает только если
+        запустить заново» — худший ответ из возможных.
+
+        Проверка идёт раз в `MIC_WATCH_INTERVAL_S`:Portaudio
+        перечисляет устройства дёшево, но не настолько дёшево, чтобы
+        спрашивать в цикле чаще.
+        """
+        if self.listener is not None:
+            return
+        if self._mic_watcher is not None and not self._mic_watcher.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._mic_watcher = loop.create_task(
+            self._watch_microphone_forever(), name="sinaps-mic-watch")
+
+    async def _watch_microphone_forever(self) -> None:
+        """Ждать микрофон и достроить контур, когда он появится."""
+        while self.listener is None:
+            await asyncio.sleep(MIC_WATCH_INTERVAL_S)
+            try:
+                attached = await self.attach_microphone()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 — слежение не должно ронять ассистента
+                log.warning("Проверка микрофона не удалась", exc_info=True)
+                continue
+            if attached:
+                log.info("Микрофон появился — контур прослушивания запущен")
+                return
+
+    async def attach_microphone(self) -> bool:
+        """Достроить контур прослушивания, если микрофон появился.
+
+        Возвращает `True`, когда контур поднят. Повторный вызов, когда
+        микрофон уже есть, ничего не делает и возвращает `False`: две
+        задачи прослушивания звучали бы одновременно и забирали бы
+        звук друг у друга.
+
+        Контур собирается из тех же кирпичиков, что и при старте, —
+        иначе «работает после переподключения» и «работает с самого
+        начала» были бы разными программами.
+        """
+        if self.listener is not None:
+            return False
+
+        from .audio.devices import has_input_device
+
+        if not has_input_device():
+            return False
+
+        cfg = self.config
+
+        try:
+            from .audio.source import make_source
+
+            capture = make_source(
+                None,
+                sample_rate=cfg.audio.sample_rate,
+                frame_ms=cfg.audio.frame_ms,
+                pre_roll_ms=cfg.audio.pre_roll_ms,
+                device=cfg.audio.input_device,
+                latency=cfg.audio.latency,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Устройство появилось, но открыть его не вышло: драйвер,
+            # звуковая карта занята другой программой. Следующая
+            # проверка через интервал попробует снова.
+            log.warning("Микрофон найден, но не открывается: %s", exc)
+            return False
+
+        listener = ListeningPipeline(
+            capture=capture, stt=self.stt, vad_engine=cfg.vad.engine,
+            session=self.session, bus=self.bus, metrics=self.metrics,
+            vad_threshold=cfg.vad.threshold, silence_ms=cfg.vad.silence_ms,
+            min_speech_ms=cfg.vad.min_speech_ms,
+            max_utterance_s=cfg.vad.max_utterance_s,
+            listen_timeout_s=cfg.wake.listen_timeout_s,
+            require_activation=cfg.wake.mode == "hotkey",
+            min_confidence=cfg.stt.min_confidence,
+            record_audio=cfg.privacy.record_audio,
+        )
+
+        try:
+            await listener.start()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Контур прослушивания не запустился: %s", exc)
+            try:
+                await capture.stop()
+            except Exception:  # noqa: BLE001
+                log.debug("Не удалось закрыть микрофон после сбоя",
+                          exc_info=True)
+            return False
+
+        self.capture = capture
+        self.listener = listener
+
+        if cfg.wake.mode == "hotkey":
+            trigger = build_trigger(cfg, listener, loop=_current_loop())
+            self.trigger = trigger
+            self.trigger_error = trigger.start()
+            if self.trigger_error:
+                log.warning("Активация не работает: %s", self.trigger_error)
+
+        try:
+            await self.bus.emit(EventType.MICROPHONE_ATTACHED)
+        except Exception:  # noqa: BLE001 — событие не обязано быть услышано
+            log.debug("Событие подключения микрофона не доставлено",
+                      exc_info=True)
+
+        return True
 
     async def reload_plugin(self, name: str) -> bool:
         """Перезагрузить плагин по имени, без перезапуска ассистента.

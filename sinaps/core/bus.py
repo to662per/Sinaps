@@ -74,6 +74,11 @@ class EventType(str, enum.Enum):
     #: процесс закрыт, следующий запрос попробует снова.
     PLUGIN_WAKE_FAILED = "plugin_wake_failed"
 
+    #: Микрофон появился после старта, контур прослушивания поднят.
+    #: Без этого события интерфейс не узнает, что ассистент « ожил»:
+    #: в трее и в окне по-прежнему написано «работает без голоса».
+    MICROPHONE_ATTACHED = "microphone_attached"
+
     # Служебные
     ERROR = "error"
     METRIC = "metric"
