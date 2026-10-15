@@ -258,6 +258,130 @@ class MemoryStore:
             )
         ]
 
+    def history(self, *, query: str = "", role: str = "", intent: str = "",
+                since: float | None = None, until: float | None = None,
+                limit: int = 300) -> list[Entry]:
+        """История с фильтрами — для вкладки в окне.
+
+        `LIKE`, а не FTS5: полнотекстовый индекс на русском требует
+        отдельного словаря и ломался бы о слова вроде «ёжик» и «взять».
+        Критерий версии — работающий поиск на 1000 диалогах, а не
+        индекс; измерять скорость на живом объёме раньше, чем понятно,
+        что LIKE не хватает, — значит платить за лишнюю схему.
+
+        Порядок составных условий повторяет разговор: сначала что
+        сказано, потом кто, потом когда. Неизбежно `LIKE` по каждому
+        условию, но список невелик и отдаётся с ограничением.
+        """
+        sql = "SELECT * FROM dialogues"
+        clauses: list[str] = []
+        params: list = []
+
+        text = (query or "").strip()
+        if text:
+            clauses.append("text LIKE ?")
+            params.append(f"%{text}%")
+
+        who = (role or "").strip()
+        if who:
+            clauses.append("role = ?")
+            params.append(who)
+
+        name = (intent or "").strip()
+        if name:
+            clauses.append("intent = ?")
+            params.append(name)
+
+        if since is not None:
+            clauses.append("ts >= ?")
+            params.append(float(since))
+        if until is not None:
+            clauses.append("ts <= ?")
+            params.append(float(until))
+
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY ts DESC, id DESC LIMIT ?"
+        params.append(max(1, int(limit)))
+
+        return [self._row_to_entry(r) for r in self._read(sql, tuple(params))]
+
+    def history_stats(self, *, days: int = 7) -> dict[str, Any]:
+        """Сводка для вкладки «История».
+
+        Считается по обменам, а не по отдельным репликам: «сколько фраз
+        за неделю» про обмены, и считать реплики значит удвоить число и
+        показать человеку то, чего он не говорил.
+        """
+        since = time.time() - max(1, int(days)) * 86400
+
+        turns = self._read(
+            "SELECT intent, AVG(total_ms) AS avg_ms, COUNT(*) AS n"
+            " FROM turns WHERE started_at >= ? GROUP BY intent",
+            (since,),
+        )
+
+        by_intent = sorted(
+            ({"intent": r["intent"] or "—",
+              "count": int(r["n"]),
+              "avg_ms": int(r["avg_ms"] or 0)} for r in turns),
+            key=lambda item: (-item["count"], item["intent"]),
+        )
+
+        total_row = self._read(
+            "SELECT COUNT(*) AS n, AVG(total_ms) AS avg_ms FROM turns"
+            " WHERE started_at >= ?", (since,))
+        total_turns = int(total_row[0]["n"]) if total_row else 0
+        avg_total = int(total_row[0]["avg_ms"] or 0) if total_row else 0
+
+        day_row = self._read(
+            "SELECT COUNT(*) AS n FROM dialogues WHERE ts >= ?", (since,))
+        phrases = int(day_row[0]["n"]) if day_row else 0
+
+        return {
+            "days": int(days),
+            "phrases": phrases,
+            "turns": total_turns,
+            "avg_ms": avg_total,
+            "top_intents": by_intent[:5],
+        }
+
+    def export(self, path: str | Path, *, query: str = "", role: str = "",
+               intent: str = "") -> int:
+        """Выгрузить историю в JSON или TXT. Возвращает число записей.
+
+        Формат выбирается по расширению: `.json` — разбираемо
+        машиной, всё прочее — читаемо человеком. Явный выбор формата
+        не сделан намеренно: человек зовёт «выгрузить» и ждёт файл,
+        который сможет открыть.
+        """
+        entries = self.history(query=query, role=role, intent=intent,
+                               limit=100000)
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+
+        if target.suffix.lower() == ".json":
+            payload = [
+                {"ts": e.ts, "when": datetime.fromtimestamp(e.ts).isoformat(),
+                 "role": e.role, "text": e.text, "source": e.source,
+                 "intent": e.intent, "confidence": e.confidence,
+                 "latency_ms": e.latency_ms}
+                for e in entries
+            ]
+            target.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8")
+        else:
+            lines = []
+            for entry in entries:
+                when = datetime.fromtimestamp(entry.ts).strftime(
+                    "%d.%m.%Y %H:%M:%S")
+                who = "Вы" if entry.role == "user" else "Син"
+                lines.append(f"[{when}] {who}: {entry.text}")
+            target.write_text("\n".join(lines), encoding="utf-8")
+
+        return len(entries)
+
     def by_day(self, days: int = 7) -> dict[str, int]:
         """Сколько реплик было в каждый из последних дней."""
         since = time.time() - max(1, int(days)) * 86400

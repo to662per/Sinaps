@@ -29,7 +29,9 @@ from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QLineEdit,
                                QPushButton, QSizePolicy, QStackedWidget,
                                QVBoxLayout, QWidget)
 
+from .history_view import HistoryView
 from .plugins_view import PluginsView
+from .settings_view import RESTART_MARKERS, SettingsView
 from .theme import (CARD, DANGER, EDGE, MUTED, TEXT, WARNING, button, color,
                     font, label, rgba, shell_style)
 
@@ -57,8 +59,14 @@ class MainWindow(QWidget):
     approve_requested = Signal(str)
     revoke_requested = Signal(str)
     toggle_plugin_requested = Signal(str, bool)
-    #: Открыть раздел: ключ из `SECTIONS`.
-    section_requested = Signal(str)
+    #: Обновить историю по фильтрам.
+    history_query_changed = Signal(dict)
+    #: Выгрузить историю: (путь, фильтры).
+    history_export_requested = Signal(str, dict)
+    #: Очистить историю.
+    history_clear_requested = Signal()
+    #: Настройка изменилась: (путь настройки, значение).
+    settings_changed = Signal(str, object)
     #: Закрыть окно.
     quit_requested = Signal()
 
@@ -168,19 +176,30 @@ class MainWindow(QWidget):
         self._guard.setVisible(False)
         column.addWidget(self._guard)
 
+        # Разделы в том же порядке, что `SECTIONS`.
         self._plugins = PluginsView()
         self._stack.addWidget(self._plugins)
 
-        for key, _title in SECTIONS:
-            if key == "plugins":
-                continue
-            self._stack.addWidget(self._build_placeholder(key))
+        self._history = HistoryView()
+        self._stack.addWidget(self._history)
+
+        self._settings = SettingsView()
+        self._stack.addWidget(self._settings)
+
+        self._help = self._build_help()
+        self._stack.addWidget(self._help)
 
         self._plugins.reload_requested.connect(self.reload_requested)
         self._plugins.approve_requested.connect(self.approve_requested)
         self._plugins.revoke_requested.connect(self.revoke_requested)
         self._plugins.toggle_requested.connect(
             self.toggle_plugin_requested)
+
+        self._history.query_changed.connect(self.history_query_changed)
+        self._history.export_requested.connect(self.history_export_requested)
+        self._history.clear_requested.connect(self.history_clear_requested)
+
+        self._settings.changed.connect(self.settings_changed)
 
         column.addWidget(self._build_input())
 
@@ -241,32 +260,45 @@ class MainWindow(QWidget):
 
         return self._wrap(row)
 
-    def _build_placeholder(self, key: str) -> QWidget:
-        """Заглушка раздела, который придёт в Beta 1.2.
+    def _build_help(self) -> QWidget:
+        """Справка прямо в окне.
 
-        Заглушка, а не пустота: раздел есть в списке, но не сделан — и
-        человек видит это сразу, а не после нажатия в пустоту.
+        Отдельный файл на каждый вопрос человек не пойдёт читать, а
+        справка нужна чаще всего там, где человек уже что-то нажал.
         """
         box = QFrame()
-        box.setObjectName(f"placeholder_{key}")
-        box.setStyleSheet(shell_style(f"placeholder_{key}"))
+        box.setObjectName("help")
+        box.setStyleSheet(shell_style("help"))
 
         column = QVBoxLayout(box)
-        column.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        column.setSpacing(8)
+        column.setContentsMargins(18, 16, 18, 16)
+        column.setSpacing(12)
 
-        title = QLabel(dict(SECTIONS)[key])
-        title.setFont(font(12, bold=True))
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setStyleSheet(label(size=12, bold=True))
-        column.addWidget(title)
+        caption = QLabel("Справка")
+        caption.setFont(font(12, bold=True))
+        caption.setStyleSheet(label(size=12, bold=True))
+        column.addWidget(caption)
 
-        hint = QLabel("Этот раздел появится в Beta 1.2.")
-        hint.setFont(font(9))
-        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        hint.setStyleSheet(label(size=9, tone=MUTED))
-        column.addWidget(hint)
+        text = QLabel(
+            "Говорите или пишите в строке снизу — это один и тот же путь.\n\n"
+            "«что ты умеешь» — панель с примерами команд.\n"
+            "«который час» — время. «открой блокнот» — программа.\n"
+            "«поставь громкость на 50» — точная установка.\n"
+            "«погода в Москве» — плагин погоды.\n\n"
+            "Опасное — выключение, перезагрузка, сон, блокировка экрана — "
+            "спрашивает подтверждения голосом.\n\n"
+            "Плагины: раздел «Плагины». Права, перезагрузка, включение.\n"
+            "Консоль: /plugins — список, /plugins reload имя — перезагрузка.\n\n"
+            "Если ассистент не слышит — проверьте микрофон:\n"
+            "  .\\run_sinaps.bat check-mic")
+        text.setFont(font(9))
+        text.setWordWrap(True)
+        text.setStyleSheet(label(size=9, tone=MUTED))
+        text.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        column.addWidget(text)
 
+        column.addStretch(1)
         return box
 
     @staticmethod
@@ -283,12 +315,17 @@ class MainWindow(QWidget):
         Кнопка подсвечивается по `SECTIONS`, а не по индексу: при вставке
         нового раздела в середину списка индексы разъедутся, а поиск по
         ключу — нет.
+
+        Сигнала о выборе раздела здесь нет намеренно. Он был, и на него
+        отвечал обработчик в трее, который звал `show_section` снова —
+        бесконечная рекурсия, процесс падал с переполнением стека на
+        первом же клике по разделу. Сигнал без подписчика бесполезен, а
+        с подписчиком опасен; раздел переключает сам себя.
         """
         for index, (name, _title) in enumerate(SECTIONS):
             self._buttons[name].setChecked(name == key)
             if name == key:
                 self._stack.setCurrentIndex(index)
-        self.section_requested.emit(key)
 
     def set_status(self, text: str) -> None:
         """Подпись состояния в боковом меню."""
@@ -304,6 +341,30 @@ class MainWindow(QWidget):
 
     def set_input_enabled(self, enabled: bool) -> None:
         self._input.setEnabled(enabled)
+
+    def set_history(self, entries, stats=None, summary: str = "") -> None:
+        """Показать историю по текущим фильтрам."""
+        self._history.set_entries(entries)
+        if stats is not None:
+            self._history.set_stats(stats)
+        if summary:
+            self._history.set_summary(summary)
+
+    def set_settings(self, config) -> None:
+        """Показать настройки из конфигурации."""
+        self._settings.load(config)
+
+    def set_devices(self, inputs=None, outputs=None) -> None:
+        """Показать микрофоны и динамики."""
+        self._settings.set_devices(inputs, outputs)
+
+    def _rows_of(self, path: str):
+        """Строка настройки по пути. Для тестов и отладки.
+
+        Возвращает саму строку, а не поле: у строки есть подпись, а
+        проверке интересно, что подпись и поле не разъехались.
+        """
+        return self._settings._rows.get(path)
 
     def set_guard_question(self, question: str | None) -> None:
         """Показать или убрать вопрос подтверждения голосом.
@@ -326,4 +387,4 @@ class MainWindow(QWidget):
         self.phrase_entered.emit(text)
 
 
-__all__ = ["MainWindow", "SECTIONS"]
+__all__ = ["MainWindow", "RESTART_MARKERS", "SECTIONS"]

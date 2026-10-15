@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import sounddevice as sd
@@ -48,6 +49,22 @@ def list_devices(show_all: bool = False) -> list[DeviceInfo]:
             )
         )
     return devices
+
+
+def list_input_devices() -> list[tuple[Any, str]]:
+    """Микрофоны для выпадающего списка: (индекс, имя).
+
+    Именно такой вид ожидает окно настроек. Обёртка существует отдельно
+    от `list_devices` не для удобства, а ради границы: список устройств
+    имеет право знать про Portaudio, а окно — нет, иначе смена бэкенда
+    аудио потянула бы за собой правку интерфейса.
+    """
+    return [(d.index, d.name) for d in list_devices() if d.is_input]
+
+
+def list_output_devices() -> list[tuple[Any, str]]:
+    """Динамики для выпадающего списка: (индекс, имя)."""
+    return [(d.index, d.name) for d in list_devices() if not d.is_input]
 
 
 def _default_device_indices() -> tuple[int | None, int | None]:

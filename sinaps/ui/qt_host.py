@@ -437,12 +437,51 @@ class QtHost:
                 self._revoke_plugin_from_ui)
             self.main_window.toggle_plugin_requested.connect(
                 self._toggle_plugin_from_ui)
-            self.main_window.section_requested.connect(
-                self._on_section_changed)
+            self.main_window.history_query_changed.connect(
+                self._on_history_query)
+            self.main_window.history_export_requested.connect(
+                self._on_history_export)
+            self.main_window.history_clear_requested.connect(
+                self._on_history_clear)
+            self.main_window.settings_changed.connect(
+                self._on_setting_changed)
 
+        self._fill_settings(self.main_window)
         self._refresh_main_window()
         self.main_window.show()
         self.main_window.raise_()
+
+    def _fill_settings(self, window) -> None:
+        """Показать настройки и список устройств.
+
+        Окно передаётся явно, а не берётся из `self`: иначе вызов
+        молча вышел бы, покидая окно с пустыми списками, и человек
+        решил бы, что микрофонов в системе нет.
+
+        Список микрофонов опрашивается Portaudio, а это может занять
+        десятки миллисекунд и на худой машине — заметно. Поэтому он
+        наполняется один раз, при создании окна, а не на каждом
+        показе: подключённый микрофон за время жизни окна меняется
+        редко, а тормозить открытие окна — часто.
+        """
+        if window is None:
+            return
+
+        try:
+            window.set_settings(self.cfg)
+        except Exception:                             # noqa: BLE001
+            log.exception("Главное окно: не удалось показать настройки")
+
+        try:
+            from ..audio.devices import (list_input_devices,
+                                          list_output_devices)
+
+            window.set_devices(list_input_devices(), list_output_devices())
+        except Exception:                             # noqa: BLE001
+            # Нет Portaudio или нет звуковой карты: список останется
+            # пустым, работа с клавиатуры по-прежнему возможна.
+            log.warning("Не удалось получить список устройств звука",
+                        exc_info=True)
 
     def _refresh_main_window(self) -> None:
         """Обновить снимок плагинов и подпись состояния."""
@@ -466,18 +505,147 @@ class QtHost:
             status = runtime.session.state.value
         self.main_window.set_status(status)
 
-    def _on_section_changed(self, key: str) -> None:
-        """Раздел «История» показывает то же окно, что и раньше.
+    # --- история ----------------------------------------------------------
 
-        Дублировать историю в главном окне незачем: она уже написана и
-        работает, а копия через месяц разошлась бы с оригиналом.
+    def _on_history_query(self, filters: dict) -> None:
+        """Показать историю по фильтрам.
+
+        Запрос уходит в asyncio-поток: база занята там, а окно живёт в
+        Qt-потоке, и обращение из одного в другое без границы кончается
+        зависанием или порчей соединения sqlite.
         """
-        if key == "history":
-            self.main_window.show_section("history")
-            self._show_history()
-        elif key == "settings":
-            self.main_window.show_section("settings")
-            self._show_settings()
+        if self._store is None:
+            self._notify("История", "Хранилище недоступно")
+            return
+
+        async def _load() -> None:
+            entries = self._store.history(**filters)
+            stats = self._store.history_stats()
+            summary = f"показано {len(entries)}"
+            self._post_to_window(
+                lambda: self.main_window.set_history(entries, stats, summary))
+
+        self._call_async(_load)
+
+    def _on_history_export(self, _path: str, filters: dict) -> None:
+        """Выгрузить историю в файл рядом с базой."""
+        if self._store is None:
+            self._notify("История", "Хранилище недоступно")
+            return
+
+        async def _export() -> None:
+            from datetime import datetime
+
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            target = Path(self._store.path).parent / f"history_{stamp}.json"
+            written = self._store.export(target, **filters)
+            self._post_to_window(
+                lambda: self._notify(
+                    "История", f"Выгружено записей: {written}\n{target}"))
+
+        self._call_async(_export)
+
+    def _on_history_clear(self) -> None:
+        """Очистка истории — только голосом.
+
+        Тридцать дней разговоров стираются одним щелчком рядом с кнопкой
+        выгрузки. Подтверждение голосом здесь не формальность: восстановить
+        нечего.
+        """
+        if self._store is None:
+            return
+
+        async def _clear() -> str:
+            removed = self._store.clear()
+            log.info("История очищена голосом: удалено записей %d", removed)
+            self._post_to_window(
+                lambda: self._refresh_main_window()
+                if self.main_window is not None else None)
+            return f"История очищена, удалено записей {removed}"
+
+        self._ask_voice(
+            "Очистить всю историю разговоров? Это нельзя отменить",
+            _clear, "очистка истории")
+
+    # --- настройки --------------------------------------------------------
+
+    def _on_setting_changed(self, path: str, value) -> None:
+        """Настройка изменена мышью.
+
+        Пишется в тот же `config.yaml`, что и раньше. Отдельный файл
+        означал бы два источника правды: «я поменял, а оно не
+        применилось» невозможно будет отличить от «я поменял не там».
+        """
+        runtime = self._runtime
+        if runtime is None:
+            return
+
+        cfg = runtime.config
+
+        # Путь `stt.model` разбирается вручную: конфигурация — вложенные
+        # dataclass'ы, а не словарь, и общего способа задать поле у неё нет.
+        parts = path.split(".")
+        target = cfg
+        for part in parts[:-1]:
+            target = getattr(target, part, None)
+            if target is None:
+                self._notify("Настройки", f"Неизвестный раздел: {path}")
+                return
+
+        name = parts[-1]
+        if not hasattr(target, name):
+            self._notify("Настройки", f"Неизвестная настройка: {path}")
+            return
+
+        old = getattr(target, name)
+        if old == value:
+            return
+
+        setattr(target, name, value)
+        try:
+            cfg.save()
+        except Exception as exc:                      # noqa: BLE001
+            log.exception("Не удалось сохранить настройку %s", path)
+            self._notify("Настройки", f"Сохранить не получилось: {exc}")
+            return
+
+        log.info("Настройка %s: %r -> %r", path, old, value)
+
+        # Применить на лету то, что можно, и сказать про остальное.
+        if path == "tts.test":
+            self._call_async(
+                lambda: runtime.conversation.speak_now("Проверка голоса"))
+            return
+        if path in ("privacy.keep_history_days",):
+            self._store and setattr(self._store, "keep_days", int(value))
+            return
+
+        from .main_window import RESTART_MARKERS
+        needs_restart = any(path.startswith(prefix)
+                            for prefix in RESTART_MARKERS)
+        if needs_restart:
+            self._notify(
+                "Настройки",
+                f"{path} = {value}\nПрименится после перезапуска ассистента.")
+        else:
+            self._notify("Настройки", f"{path} = {value}")
+
+    def _post_to_window(self, action) -> None:
+        """Выполнить действие в Qt-потоке.
+
+        Результат приходит из asyncio-потока, а окно живёт в Qt-потоке.
+        Обновлять виджет из чужого потока нельзя — Qt это не прощает и
+        падает без внятного сообщения.
+        """
+        app = self.app
+        if app is None:
+            return
+        try:
+            from PySide6.QtCore import QTimer
+
+            QTimer.singleShot(0, action)
+        except Exception:                             # noqa: BLE001
+            log.exception("Не удалось обновить окно")
 
     # --- плагины из окна ---------------------------------------------------
 

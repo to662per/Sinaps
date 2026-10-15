@@ -125,25 +125,86 @@ def test_switching_sections_switches_stack(window):
             f"кнопка «{key}» не подсвечена")
 
 
-def test_section_signal_emitted(window):
-    """Раздел сообщает наружу — трею это нужно для своих окон."""
-    got: list[str] = []
-    window.section_requested.connect(got.append)
+def test_all_sections_switchable_in_a_row(window):
+    """Перебор всех разделов подряд не падает.
+
+    Именно этот порядок проверяет то, что проверять было нужно: раньше
+    переход на «Историю» или «Настройки» ронял процесс с переполнением
+    стека, потому что обработчик раздела звал `show_section` снова.
+    Тест с безобидным подписчиком этого не видел: рекурсия жила в
+    связке с настоящим обработчиком, а он в тесте не участвовал.
+    """
+    for _pass in range(3):
+        for key, _title in SECTIONS:
+            window.show_section(key)
+
+
+def test_repeated_same_section_is_safe(window):
+    """Повторный выбор того же раздела тоже безопасен."""
+    window.show_section("history")
+    window.show_section("history")
+    window.show_section("history")
+
+    assert window._stack.currentIndex() == 1
+
+
+def test_switching_back_and_forth_between_two_sections(window):
+    """Быстрое переключение туда-обратно не копит ничего.
+
+    Рекурсия обнаруживается не сразу: она растёт по одному вызову за
+    клик. Один переход может пройти незаметно, и падение случится на
+    третьем.
+    """
+    for _ in range(50):
+        window.show_section("settings")
+        window.show_section("history")
+        window.show_section("plugins")
+
+
+def test_settings_section_is_real_not_placeholder(window):
+    """Раздел «Настройки» рабочий, а не заглушка.
+
+    Раньше здесь стояла надпись «появится в Beta 1.2». Теперь раздел
+    настоящий, и тест проверяет именно это: заглушка вернулась бы так
+    же незаметно, как её убрали.
+    """
+    from sinaps.ui.settings_view import SettingsView
+
+    window.show_section("settings")
+    page = window._stack.currentWidget()
+
+    assert isinstance(page, SettingsView)
+    assert page._rows, "в разделе настроек нет ни одной строки"
+
+
+def test_history_section_is_real(window):
+    """Раздел «История» рабочий."""
+    from sinaps.ui.history_view import HistoryView
 
     window.show_section("history")
 
-    assert got == ["history"]
+    assert isinstance(window._stack.currentWidget(), HistoryView)
 
 
-def test_placeholder_says_it_is_not_done(window):
-    """Незаконченный раздел говорит об этом, а не показывает пустоту."""
+def test_no_placeholder_text_anywhere(window):
+    """Ни в одном разделе не осталось слов про «Beta 1.2».
+
+    Поиск по всем подписям, а не по одному разделу: заглушка могла бы
+    остаться в том, который никто не открывает.
+    """
+    window.show_section("history")
+    window.set_history([], None, "История пуста")
     window.show_section("settings")
+    window.show_section("help")
 
-    current = window._stack.currentWidget()
-    texts = labels_in(current)
-
-    assert any("1.2" in t for t in texts), (
-        f"заглушка не говорит, что раздел ещё не сделан: {texts}")
+    for key, _title in SECTIONS:
+        window.show_section(key)
+        texts = labels_in(window._stack.currentWidget())
+        for text in texts:
+            assert "Beta 1.2" not in text, (
+                f"в разделе «{key}» осталась заглушка: {text!r}")
+            assert "появится" not in text, (
+                f"в разделе «{key}» обещание будущего: {text!r}")
 
 
 # --- вкладка плагинов --------------------------------------------------------
