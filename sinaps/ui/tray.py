@@ -112,6 +112,10 @@ class Bridge(QObject):
     history_requested = Signal()
     settings_requested = Signal()
     capabilities_requested = Signal()
+    #: Главное окно. Двойной клик по значку и отдельный пункт меню —
+    #: трей остаётся рабочим способом управлять ассистентом, а большое
+    #: окно не делается единственным путём.
+    main_window_requested = Signal()
     #: Ассистент попросил открыть панель. Испускается из asyncio-потока,
     #: поэтому ходить через сигнал, а не через `QTimer.singleShot`:
     #: таймер создаётся в том потоке, из которого вызван, и в чужом
@@ -167,6 +171,16 @@ class TrayIcon(QSystemTrayIcon):
         self._mute_action.setChecked(True)
         self._mute_action.toggled.connect(self.bridge.speak_toggled)
         menu.addAction(self._mute_action)
+        menu.addSeparator()
+
+        # Главное окно идёт первым пунктом: после Beta 1.1 это основной
+        # способ посмотреть на плагины и состояние, а не единственный —
+        # трей с историей и настройками остаётся на месте.
+        main_action = QAction("Окно Sinaps…", menu)
+        main_action.setToolTip("Плагины, история, настройки, справка")
+        main_action.triggered.connect(self.bridge.main_window_requested)
+        menu.addAction(main_action)
+
         menu.addSeparator()
 
         history_action = QAction("История…", menu)
@@ -227,10 +241,16 @@ class TrayIcon(QSystemTrayIcon):
         self._history_action.setText(f"История: {view.history_count}")
 
     def _on_activated(self, reason) -> None:
+        """Клик по значку открывает главное окно.
+
+        Раньше здесь открывалась история. Теперь главное окно: после
+        Beta 1.1 это то, куда человек идёт посмотреть на плагины, а
+        история лежит в нём же разделом.
+        """
         reason = QSystemTrayIcon.ActivationReason(reason)
         if reason in (QSystemTrayIcon.ActivationReason.Trigger,
                       QSystemTrayIcon.ActivationReason.DoubleClick):
-            self.bridge.status_window_requested.emit()
+            self.bridge.main_window_requested.emit()
         else:
             self._menu.popup(QCursor.pos())
 

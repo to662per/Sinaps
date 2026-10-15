@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .audio.capture import AudioCapture  # noqa: F401  (re-export для удобства импорта)
 from .audio.player import AudioPlayer
@@ -62,6 +62,10 @@ class Runtime:
 
     #: Фоновая задача, закрывающая простоящие процессы плагинов.
     _reaper: asyncio.Task | None = None
+
+    #: Плагины, выключенные пользователем. Их команды убраны из
+    #: реестра, поэтому перезагрузка их не запустит.
+    disabled_plugins: set[str] = field(default_factory=set)
 
     #: Текст проблемы с перехватом клавиш/мыши, если он не заработал.
     trigger_error: str | None = None
@@ -205,6 +209,23 @@ class Runtime:
         if self.plugins is None:
             return ()
         return tuple(plugin.name for plugin in self.plugins.loaded)
+
+    def plugin_view(self):
+        """Снимок состояния плагинов для интерфейса.
+
+        Снимок, а не ссылка на живые объекты: окно живёт в Qt-потоке,
+        плагины — в asyncio-потоке, и отдавать первому второе нельзя.
+        """
+        from .plugins.view import build_plugin_view
+
+        if self.plugins is None:
+            from .plugins.view import PluginView
+
+            return PluginView()
+        return build_plugin_view(
+            self.plugins,
+            disabled=frozenset(self.disabled_plugins),
+        )
 
     async def stop_plugins(self) -> None:
         """Остановить фоновую уборку и закрыть процессы плагинов.

@@ -36,6 +36,9 @@ from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel,
                                QVBoxLayout, QWidget)
 
 from .panel_data import IDLE_CLOSE_S, Card, PanelData
+from .theme import (
+    ACCENT, CARD, CARD_HOVER, DANGER, EDGE, MUTED, SUCCESS, TEXT,
+)
 
 log = logging.getLogger(__name__)
 
@@ -51,15 +54,17 @@ GRID_SPACING = 10
 
 #: Палитра. Тёмная, чтобы не резала глаза вечером и читалась поверх
 #: любого окна: на светлом фоне тёмная подложка, на тёмном — подложка
-#: с обводкой.
+#: с обводкой. Значения живут в `theme.py`, чтобы главное окно и панель
+#: не разъехались по полутону.
 _BACKDROP = QColor(18, 20, 26, 244)
-_CARD = QColor(32, 36, 45, 255)
-_CARD_HOVER = QColor(44, 50, 62, 255)
-_EDGE = QColor(78, 86, 102, 255)
-_TEXT = QColor(232, 235, 240)
-_MUTED = QColor(154, 164, 178)
-_ACCENT = QColor(61, 139, 253)
-_DANGER = QColor(229, 83, 75)
+_CARD = CARD
+_CARD_HOVER = CARD_HOVER
+_EDGE = EDGE
+_TEXT = TEXT
+_MUTED = MUTED
+_ACCENT = ACCENT
+_DANGER = DANGER
+_SUCCESS = SUCCESS
 
 
 class Panel(QWidget):

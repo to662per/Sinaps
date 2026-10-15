@@ -82,6 +82,7 @@ class QtHost:
         self.history_window = None
         self.settings_window = None
         self.panel = None
+        self.main_window = None
 
         self.loop: asyncio.AbstractEventLoop | None = None
         self._loop_thread: threading.Thread | None = None
@@ -335,6 +336,7 @@ class QtHost:
         bridge.settings_requested.connect(self._show_settings)
         bridge.capabilities_requested.connect(self._show_panel)
         bridge.panel_requested.connect(self._show_panel)
+        bridge.main_window_requested.connect(self._show_main_window)
         bridge.status_window_requested.connect(self._show_history)
         bridge.clear_history_requested.connect(self._clear_history)
         bridge.quit_requested.connect(self._quit_app)
@@ -408,6 +410,212 @@ class QtHost:
             self.history_window._reload()  # noqa: SLF001
 
     # --- окна --------------------------------------------------------------
+
+    def _show_main_window(self) -> None:
+        """Показать главное окно.
+
+        Создаётся один раз и переиспользуется: показывать заново каждый
+        раз означало бы заново строить все карточки плагинов, а при
+        двадцати плагинах это заметная задержка.
+
+        Данные плагинов приходят из asyncio-потока, поэтому каждый раз
+        перед показом окно просит снимок. Это дешевле, чем подписка на
+        события с перерисовкой на каждый чих: плагинов мало, а список
+        меняется редко.
+        """
+        if self.main_window is None:
+            from .main_window import MainWindow
+
+            self.main_window = MainWindow()
+            self.main_window.phrase_entered.connect(self._say_to_assistant)
+            self.main_window.listen_requested.connect(self._open_listen)
+            self.main_window.reload_requested.connect(
+                self._reload_plugin_from_ui)
+            self.main_window.approve_requested.connect(
+                self._approve_plugin_from_ui)
+            self.main_window.revoke_requested.connect(
+                self._revoke_plugin_from_ui)
+            self.main_window.toggle_plugin_requested.connect(
+                self._toggle_plugin_from_ui)
+            self.main_window.section_requested.connect(
+                self._on_section_changed)
+
+        self._refresh_main_window()
+        self.main_window.show()
+        self.main_window.raise_()
+
+    def _refresh_main_window(self) -> None:
+        """Обновить снимок плагинов и подпись состояния."""
+        if self.main_window is None:
+            return
+        runtime = self._runtime
+        if runtime is None:
+            self.main_window.set_plugin_summary("Ассистент не запущен")
+            return
+
+        try:
+            self.main_window.set_plugins_view(runtime.plugin_view())
+        except Exception:                             # noqa: BLE001
+            log.exception("Главное окно: не удалось собрать данные о плагинах")
+            self.main_window.set_plugin_summary("Не удалось прочитать плагины")
+            return
+
+        try:
+            status = self._state_text(runtime.session.state.value)
+        except Exception:                             # noqa: BLE001
+            status = runtime.session.state.value
+        self.main_window.set_status(status)
+
+    def _on_section_changed(self, key: str) -> None:
+        """Раздел «История» показывает то же окно, что и раньше.
+
+        Дублировать историю в главном окне незачем: она уже написана и
+        работает, а копия через месяц разошлась бы с оригиналом.
+        """
+        if key == "history":
+            self.main_window.show_section("history")
+            self._show_history()
+        elif key == "settings":
+            self.main_window.show_section("settings")
+            self._show_settings()
+
+    # --- плагины из окна ---------------------------------------------------
+
+    def _reload_plugin_from_ui(self, name: str) -> None:
+        runtime = self._runtime
+        if runtime is None:
+            return
+        self._notify("Плагины", f"Перезагружаю {name}…")
+
+        async def _reload() -> bool:
+            ok = await runtime.reload_plugin(name)
+            self._refresh_main_window()
+            if not ok:
+                self._notify(
+                    "Плагины",
+                    f"Не удалось перезагрузить {name}. Подробности в журнале.")
+            return ok
+
+        self._call_async(_reload)
+
+    def _approve_plugin_from_ui(self, name: str) -> None:
+        """Одобрить права прямо из окна.
+
+        Одобрение пишется через `approvals.grant`, а не в обход него:
+        файл один, иначе права из окна и права из голоса разошлись бы.
+        """
+        from ..plugins import approvals
+        from ..plugins.manifest import permission_title
+
+        runtime = self._runtime
+        if runtime is None or runtime.plugins is None:
+            return
+
+        plugin = next((p for p in runtime.plugins.loaded if p.name == name),
+                      None)
+        if plugin is None:
+            self._notify("Плагины", f"Плагин {name} не загружен")
+            return
+
+        try:
+            approvals.grant(name, plugin.permissions)
+        except Exception as exc:                      # noqa: BLE001
+            log.exception("Не удалось записать одобрение для %s", name)
+            self._notify("Плагины", f"Не удалось сохранить: {exc}")
+            return
+
+        granted = ", ".join(permission_title(p)
+                            for p in sorted(plugin.permissions)) or "нет прав"
+        log.info("Плагин %s одобрен из окна: %s", name, granted)
+        self._notify("Права одобрены", f"{name}: {granted}")
+
+        # Плагин продолжает работать с прежними правами до перезагрузки:
+        # право проверяется при обращении к возможности, а не при старте.
+        self._call_async(lambda: runtime.reload_plugin(name))
+        self._refresh_main_window()
+
+    def _revoke_plugin_from_ui(self, name: str) -> None:
+        from ..plugins import approvals
+
+        runtime = self._runtime
+        if runtime is None or runtime.plugins is None:
+            return
+
+        plugin = next((p for p in runtime.plugins.loaded if p.name == name),
+                      None)
+        try:
+            approvals.revoke(name)
+        except Exception as exc:                      # noqa: BLE001
+            log.exception("Не удалось отозвать права у %s", name)
+            self._notify("Плагины", f"Не удалось отозвать: {exc}")
+            return
+
+        missing = sorted(plugin.permissions) if plugin is not None else []
+        log.info("Права плагина %s отозваны: %s", name, ", ".join(missing))
+        self._notify("Права отозваны",
+                     f"{name}: нужно новое одобрение при следующем запуске")
+        self._refresh_main_window()
+
+    def _toggle_plugin_from_ui(self, name: str, enable: bool) -> None:
+        """Включить или выключить плагин без перезапуска ассистента.
+
+        Выключение убирает команды из реестра и закрывает процесс.
+        Обратное действие грузит плагин заново — иначе включение было бы
+        обещанием, которое ничего не делает.
+        """
+        runtime = self._runtime
+        if runtime is None or runtime.plugins is None:
+            return
+
+        plugin = next((p for p in runtime.plugins.loaded if p.name == name),
+                      None)
+
+        if not enable:
+            runtime.disabled_plugins.add(name)
+            if plugin is not None and plugin.holder is not None:
+                runtime.registry.remove(plugin.holder)
+            self._call_async(lambda: plugin.stop(reason="stop"))
+            log.info("Плагин %s выключен из окна", name)
+            self._refresh_main_window()
+            return
+
+        runtime.disabled_plugins.discard(name)
+        if plugin is None:
+            self._notify("Плагины",
+                         f"Плагин {name} не загружен, включить нельзя")
+            return
+        self._call_async(lambda: runtime.reload_plugin(name))
+        self._refresh_main_window()
+
+    @staticmethod
+    def _state_text(state: str) -> str:
+        """Название состояния для окна — то же, что в трее."""
+        from .tray import STATES
+
+        _, title, _ = STATES.get(state, STATES["idle"])
+        return title
+
+    def _open_listen(self) -> None:
+        """Кнопка «Слушать»: активация микрофона без горячей клавиши.
+
+        Микрофон пропадает нечасто — на ноутбуке может отвалиться кнопка
+        или её съест софт, — и тогда включить ассистента нечем. Вторая
+        дверь нужна.
+        """
+        runtime = self._runtime
+        if runtime is None:
+            return
+        if runtime.listener is None:
+            self._notify("Sinaps", "Микрофон не используется")
+            return
+        async def _activate() -> bool:
+            opened = await runtime.listener.activate(source="button")
+            if not opened:
+                reason = "пауза включена" if runtime.session.state else ""
+                self._notify("Sinaps", f"Сейчас не слушаю{': ' + reason if reason else ''}")
+            return opened
+
+        self._call_async(_activate)
 
     def _show_history(self) -> None:
         from .windows import HistoryWindow
