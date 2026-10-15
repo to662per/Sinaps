@@ -899,6 +899,27 @@ def test_open_window_loads_history(app, store):
     assert asked, "окно из трея не спросило историю"
 
 
+def test_history_loads_when_tab_shown(app, store):
+    """История загружается при показе вкладки, а не только при открытии окна.
+
+    Раньше `request_history()` вызывался один раз в `_show_main_window`.
+    Если человек открыл окно, ушёл в настройки, а потом вернулся в
+    историю — список оставался пустым, потому что никто его не
+    переспрашивал. Теперь `show_section("history")` вызывает
+    `request_history()`.
+    """
+    window = MainWindow()
+
+    asked: list[dict] = []
+    window.history_query_changed.connect(asked.append)
+
+    # Переключение на историю
+    window.show_section("history")
+
+    assert asked, "переключение на историю не спросило базу"
+    assert asked[-1]["query"] == ""
+
+
 def test_missing_value_is_left_alone(app):
     """Отсутствующее значение не заменяется нулём.
 

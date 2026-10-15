@@ -327,6 +327,13 @@ class MainWindow(QWidget):
             if name == key:
                 self._stack.setCurrentIndex(index)
 
+        # История не загружается при старте окна: она ждёт, пока её
+        # спросят. При переключении на вкладку «История» спрашиваем
+        # заново — иначе человек увидит пустой список, даже если в базе
+        # уже есть записи.
+        if key == "history":
+            self.request_history()
+
     def set_status(self, text: str) -> None:
         """Подпись состояния в боковом меню."""
         self._status.setText(text)
