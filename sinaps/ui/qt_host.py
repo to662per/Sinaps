@@ -535,7 +535,13 @@ class QtHost:
         self._refresh_main_window()
 
     def _revoke_plugin_from_ui(self, name: str) -> None:
-        from ..plugins import approvals
+        """Отзыв прав — только после голосового подтверждения.
+
+        Право — это то, что плагин может делать с компьютером. Отозвать
+        его кнопкой, не спросив голосом, значит оставить отзыв на
+        случайный щелчок рядом с кнопкой перезагрузки.
+        """
+        from ..plugins.manifest import permission_title
 
         runtime = self._runtime
         if runtime is None or runtime.plugins is None:
@@ -543,18 +549,27 @@ class QtHost:
 
         plugin = next((p for p in runtime.plugins.loaded if p.name == name),
                       None)
-        try:
-            approvals.revoke(name)
-        except Exception as exc:                      # noqa: BLE001
-            log.exception("Не удалось отозвать права у %s", name)
-            self._notify("Плагины", f"Не удалось отозвать: {exc}")
-            return
+        titles = (", ".join(permission_title(p)
+                            for p in sorted(plugin.permissions))
+                  if plugin is not None else "")
 
-        missing = sorted(plugin.permissions) if plugin is not None else []
-        log.info("Права плагина %s отозваны: %s", name, ", ".join(missing))
-        self._notify("Права отозваны",
-                     f"{name}: нужно новое одобрение при следующем запуске")
-        self._refresh_main_window()
+        async def _revoke() -> str:
+            from ..plugins import approvals
+
+            try:
+                approvals.revoke(name)
+            except Exception as exc:                  # noqa: BLE001
+                log.exception("Не удалось отозвать права у %s", name)
+                return f"Не получилось отозвать права: {exc}"
+
+            log.info("Права плагина %s отозваны: %s", name, titles)
+            self._refresh_main_window()
+            return f"Права {name} отозваны"
+
+        question = f"Отозвать права у плагина {name}?"
+        if titles:
+            question += f" Он сможет: {titles}."
+        self._ask_voice(question, _revoke, f"отзыв прав {name}")
 
     def _toggle_plugin_from_ui(self, name: str, enable: bool) -> None:
         """Включить или выключить плагин без перезапуска ассистента.
@@ -570,22 +585,74 @@ class QtHost:
         plugin = next((p for p in runtime.plugins.loaded if p.name == name),
                       None)
 
-        if not enable:
-            runtime.disabled_plugins.add(name)
-            if plugin is not None and plugin.holder is not None:
-                runtime.registry.remove(plugin.holder)
-            self._call_async(lambda: plugin.stop(reason="stop"))
-            log.info("Плагин %s выключен из окна", name)
+        # Включение — безопасное действие: плагин начинает работать там,
+        # где человек его и так поставил. Выключение — нет: оно убирает
+        # команды, которые уже отвечали, и может остаться непризнанным.
+        if enable:
+            runtime.disabled_plugins.discard(name)
+            if plugin is None:
+                self._notify(
+                    "Плагины",
+                    f"Плагин {name} не загружен, включить нельзя")
+                return
+            self._call_async(lambda: runtime.reload_plugin(name))
             self._refresh_main_window()
             return
 
-        runtime.disabled_plugins.discard(name)
-        if plugin is None:
-            self._notify("Плагины",
-                         f"Плагин {name} не загружен, включить нельзя")
+        commands = len(plugin.commands) if plugin is not None else 0
+
+        async def _disable() -> str:
+            runtime.disabled_plugins.add(name)
+            if plugin is not None and plugin.holder is not None:
+                runtime.registry.remove(plugin.holder)
+            if plugin is not None:
+                await plugin.stop(reason="stop")
+            log.info("Плагин %s выключен голосом", name)
+            self._refresh_main_window()
+            return f"Плагин {name} выключен"
+
+        self._ask_voice(
+            f"Выключить плагин {name}? Он перестанет отвечать",
+            _disable, f"выключение {name}")
+
+    def _ask_voice(self, question: str, action, label: str) -> None:
+        """Спросить голосом и выполнить действие при согласии.
+
+        Если подтверждение уже занято — сообщаем об этом и **не**
+        выполняем: человек подтвердил бы не то действие, которое
+        собирался.
+        """
+        runtime = self._runtime
+        if runtime is None:
             return
-        self._call_async(lambda: runtime.reload_plugin(name))
-        self._refresh_main_window()
+
+        if runtime.confirm_plugin_action(question, action, label):
+            self._show_guard_prompt(question)
+            return
+
+        waiting = runtime.plugin_guard.question
+        self._notify(
+            "Подтверждение",
+            f"Уже жду ответа: {waiting}\nСначала ответьте на этот вопрос.")
+
+    def _show_guard_prompt(self, question: str) -> None:
+        """Показать вопрос в окне и в трее.
+
+        В окне — чтобы человек прочитал, в трее — чтобы увидел, если
+        окно закрыто. Молчащий вопрос выглядит как зависание.
+        """
+        if self.main_window is not None:
+            self.main_window.set_guard_question(question)
+        self._notify("Подтвердите голосом", f"{question} Скажите «да» или «нет».")
+
+    def _on_guard_answered(self, done: bool, text: str) -> None:
+        """Ответ пришёл: убрать вопрос и сказать результат."""
+        if self.main_window is not None:
+            self.main_window.set_guard_question(None)
+        if done:
+            self._notify("Готово", text)
+        else:
+            self._notify("Подтверждение", text)
 
     @staticmethod
     def _state_text(state: str) -> str:

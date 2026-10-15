@@ -12,6 +12,11 @@ import logging
 import time
 from dataclasses import dataclass, field
 
+# Импорт на уровне модуля, а не под TYPE_CHECKING: `VoiceGuard` нужен в
+# `__post_init__` и в обоих сборщиках. Под TYPE_CHECKING пришлось бы
+# дублировать или прятать реальную зависимость.
+from .core.guard import VoiceGuard
+
 from .audio.capture import AudioCapture  # noqa: F401  (re-export для удобства импорта)
 from .audio.player import AudioPlayer
 from .conversation.listening import ListeningPipeline
@@ -66,6 +71,18 @@ class Runtime:
     #: Плагины, выключенные пользователем. Их команды убраны из
     #: реестра, поэтому перезагрузка их не запустит.
     disabled_plugins: set[str] = field(default_factory=set)
+
+    #: Подтверждение голосом для отзыва прав и выключения плагина.
+    #: Объект, а не поле настраиваемое снаружи: очередь подтверждений
+    #: должна быть одна на весь ассистент, иначе окно и голос спрашивали
+    #: бы одновременно о разном.
+    _plugin_guard: "VoiceGuard | None" = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        if self._plugin_guard is None:
+            from .core.guard import VoiceGuard
+
+            self._plugin_guard = VoiceGuard()
 
     #: Текст проблемы с перехватом клавиш/мыши, если он не заработал.
     trigger_error: str | None = None
@@ -242,6 +259,11 @@ class Runtime:
             except asyncio.CancelledError:
                 pass
             self._reaper = None
+        if self._plugin_guard is not None:
+            # Незакрытый вопрос при выходе бессмысленен: отвечать будет
+            # некому, а действо могло бы выполниться на следующем
+            # запуске вместе с чужим «да».
+            self._plugin_guard.cancel()
         if self.plugins is not None:
             # `reason="stop"`: плагин погашен нарочно, а не уснул по
             # простоям. По событию подписчик поймёт, что это конец
@@ -271,6 +293,33 @@ class Runtime:
             f"  Плагины  : {self.plugins_label()}\n"
             f"  Сессия   : {self.session.state.value}"
         )
+
+    def plugin_guard(self) -> "VoiceGuard":
+        """Голосовое подтверждение действий с плагинами.
+
+        Отзыв прав и выключение — те же опасные действия, что выключение
+        компьютера, только с меньшими последствиями. Подтверждаются так
+        же, голосом.
+        """
+        from .core.guard import VoiceGuard
+
+        return self._plugin_guard
+
+    def confirm_plugin_action(self, question: str, action, label: str = ""
+                              ) -> bool:
+        """Запросить подтверждение действия с плагином.
+
+        `False` — подтверждение уже занято: ждёт ответа на другой
+        вопрос. Возвращать «отменено» молча нельзя, человек подумал бы,
+        что действие выполнилось.
+        """
+        return self._plugin_guard.request(question, action, label)
+
+    async def answer_plugin_action(self, text: str, *, is_yes, is_no
+                                   ) -> tuple[bool, str]:
+        """Обработать голосовой ответ на вопрос к плагину."""
+        return await self._plugin_guard.answer(text, is_yes=is_yes,
+                                               is_no=is_no)
 
     def plugins_label(self) -> str:
         """Сколько плагинов в памяти и сколько они весят.
@@ -447,6 +496,8 @@ def build_runtime(
 
         responder = make_echo_responder()
 
+    guard = VoiceGuard()
+
     conversation = ConversationPipeline(
         bus=bus,
         session=session,
@@ -454,6 +505,7 @@ def build_runtime(
         player=player,
         metrics=metrics,
         responder=responder,
+        guard=guard,
     )
     conversation.install()
 
@@ -465,7 +517,7 @@ def build_runtime(
         config=cfg, bus=bus, session=session, metrics=metrics,
         capture=capture, player=player, stt=stt, tts=tts,
         listener=listener, conversation=conversation,
-        trigger=trigger,
+        trigger=trigger, _plugin_guard=guard,
     )
 
 
@@ -573,9 +625,15 @@ async def build_skills_runtime(
             record_audio=cfg.privacy.record_audio,
         )
 
+    # Один объект подтверждения на оба места: конвейер должен видеть тот
+    # же вопрос, который задал интерфейс. Два разных guard означали бы,
+    # что на вопрос «отозвать права?» отвечает один, а действие выполняет
+    # другой — и «да» прошло бы мимо.
+    guard = VoiceGuard()
+
     conversation = ConversationPipeline(
         bus=bus, session=session, tts=tts, player=player, metrics=metrics,
-        responder=engine.respond, memory=_make_memory(cfg),
+        responder=engine.respond, memory=_make_memory(cfg), guard=guard,
     )
     conversation.install()
 
@@ -588,7 +646,7 @@ async def build_skills_runtime(
         capture=capture, player=player, stt=stt, tts=tts,
         listener=listener, conversation=conversation,
         registry=registry, platform=platform, trigger=trigger,
-        plugins=load_report,
+        plugins=load_report, _plugin_guard=guard,
     )
 
 

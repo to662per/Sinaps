@@ -30,8 +30,8 @@ from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QLineEdit,
                                QVBoxLayout, QWidget)
 
 from .plugins_view import PluginsView
-from .theme import (CARD, DANGER, EDGE, MUTED, TEXT, button, color, font,
-                    label, rgba, shell_style)
+from .theme import (CARD, DANGER, EDGE, MUTED, TEXT, WARNING, button, color,
+                    font, label, rgba, shell_style)
 
 log = logging.getLogger(__name__)
 
@@ -157,6 +157,16 @@ class MainWindow(QWidget):
 
         self._stack = QStackedWidget()
         column.addWidget(self._stack, 1)
+
+        # Вопрос подтверждения голосом. Прямая надпись, а не диалог:
+        # модальное окно забрало бы фокус, а это выключает микрофон —
+        # ровно то, чего здесь добиваемся.
+        self._guard = QLabel("")
+        self._guard.setWordWrap(True)
+        self._guard.setFont(font(9))
+        self._guard.setStyleSheet(label(size=9, tone=WARNING))
+        self._guard.setVisible(False)
+        column.addWidget(self._guard)
 
         self._plugins = PluginsView()
         self._stack.addWidget(self._plugins)
@@ -294,6 +304,19 @@ class MainWindow(QWidget):
 
     def set_input_enabled(self, enabled: bool) -> None:
         self._input.setEnabled(enabled)
+
+    def set_guard_question(self, question: str | None) -> None:
+        """Показать или убрать вопрос подтверждения голосом.
+
+        Пока вопрос висит, строка ввода остаётся рабочей: ответ «да»
+        можно и голосом, и напечатать. Запрещать ввод означало бы
+        оставить человека перед окном, в которое нельзя ничего ввести.
+        """
+        if question is None:
+            self._guard.setVisible(False)
+            return
+        self._guard.setText(f"{question}  Ответь голосом: «да» или «нет».")
+        self._guard.setVisible(True)
 
     def _on_enter(self) -> None:
         text = self._input.text().strip()

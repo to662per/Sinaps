@@ -21,8 +21,11 @@ import time
 from collections.abc import Awaitable, Callable
 
 from ..core.bus import EventBus, EventType
+from ..core.context import DialogContext
 from ..core.errors import DangerousActionDenied, SinapsError
-from ..core.logging_setup import log_assistant, log_dialogue_error, log_user
+from ..core.guard import VoiceGuard
+from ..core.logging_setup import (log_assistant, log_dialogue_error,
+                                  log_dialogue_guard, log_user)
 from ..core.metrics import Metrics, TurnMetrics
 from ..core.response import Reply
 from ..core.session import SessionController, State
@@ -47,6 +50,7 @@ class ConversationPipeline:
         speak_enabled: bool = True,
         confirm_timeout_s: float = 10.0,
         memory: "MemoryStore | None" = None,
+        guard: "VoiceGuard | None" = None,
     ) -> None:
         self.bus = bus
         self.session = session
@@ -59,6 +63,10 @@ class ConversationPipeline:
         # Хранилище истории. Необязательно: без него (тесты, `--text-only`
         # без БД) разговор просто не пишется на диск, но не ломается.
         self.memory = memory
+        #: Подтверждение голосом для действий интерфейса. Необязателен
+        #: по той же причине: без него ассистент просто не задаёт таких
+        #: вопросов, и разговор работает как раньше.
+        self.guard = guard
 
         self._speaking = False
         self._history: list[dict[str, str]] = []
@@ -157,6 +165,27 @@ class ConversationPipeline:
         log_user(text)
 
         try:
+            # --- подтверждение голосом для действий интерфейса ---
+            #
+            # Проверяется **до** разбора команды. Иначе «да» превратилось
+            # бы в «не знаю такую команду»: движок не знает ни слова про
+            # отзыв прав, и человек услышал бы отказ вместо ответа.
+            guard_reply = await self._answer_guard(text, source=source)
+            if guard_reply is not None:
+                # THINKING обязателен и здесь: `_say` переводит сессию
+                # в SPEAKING, а переход `idle -> speaking` запрещён
+                # таблицей. Без этой строки озвучка ответа падала бы
+                # целиком, и голосовое подтверждение не работало бы.
+                await self.session.transition(State.THINKING, reason="guard")
+                turn.mark("intent")
+                self._history.append({"role": "user", "content": text})
+                self._history.append(
+                    {"role": "assistant", "content": guard_reply.speech})
+                del self._history[:-20]
+                self._remember(text, guard_reply, source, started=started)
+                await self._say(guard_reply, turn=turn, source=source)
+                return
+
             # --- понимание ---
             await self.session.transition(State.THINKING, reason="understand")
             reply = await self.responder(text, {
@@ -201,6 +230,24 @@ class ConversationPipeline:
             # озвучка выключена и SPEAKING не случился).
             await self.session.reset(reason="dialogue_done")
             self.session.release()
+
+    async def _answer_guard(self, text: str, *, source: str) -> Reply | None:
+        """Ответ на вопрос подтверждения голосом.
+
+        Возвращает `None`, если вопроса нет и реплику надо понимать
+        обычным порядком. Проверка стоит до разбора: иначе «да» на
+        вопрос про отзыв прав дошло бы до движка как неизвестная команда.
+        """
+        guard = self.guard
+        if guard is None or not guard.has_pending:
+            return None
+
+        probe = DialogContext(text=text, source=source)
+        done, message = await guard.answer(
+            text, is_yes=probe.is_yes, is_no=probe.is_no)
+
+        log_dialogue_guard(message)
+        return Reply(speech=message, display=message)
 
     async def _say(self, reply: Reply, *, turn: TurnMetrics | None, source: str) -> None:
         text = reply.speech.strip()

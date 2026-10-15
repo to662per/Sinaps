@@ -122,6 +122,18 @@ def log_dialogue_error(msg: str) -> None:
     get_dialogue_logger().error("ОШИБКА:   %s", msg)
 
 
+def log_dialogue_guard(msg: str) -> None:
+    """Ответ на подтверждение голосом.
+
+    Отдельной строкой, а не через `log_assistant`: в журнале разговора
+    видно, что человек ответил «да» на отзыв прав, а не просто сказал
+    «да» в пустоту. По общему виду реплик это не различить.
+    """
+    msg = (msg or "").strip()
+    if msg:
+        get_dialogue_logger().info("ПОДТВ.:   %s", msg)
+
+
 def trace_event(event: Event) -> None:
     """Лёгкий след событий — только в файл, не в консоль."""
     logging.getLogger("sinaps.events").debug("%s %s", event.type.value, event.payload)
