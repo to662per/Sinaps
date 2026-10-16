@@ -43,7 +43,12 @@ class State(str, enum.Enum):
 #: текстом (консоль, трей). Акустических стадий LISTENING/TRANSCRIBING у неё
 #: нет, поэтому заставлять её «притворяться» голосом было бы artificial.
 _ALLOWED: dict[State, set[State]] = {
-    State.IDLE: {State.LISTENING, State.THINKING},
+    State.IDLE: {State.LISTENING, State.THINKING,
+                      # Ассистент заговаривает сам, без реплики:
+                      # «Прослушать пример» в настройках, сработавший
+                      # таймер. Из IDLE это законный переход, и без него
+                      # фраза не произносится вовсе.
+                      State.SPEAKING},
     # LISTENING -> THINKING добавлен для ответа на вопрос подтверждения:
     # вопрос задаётся голосом, человек отвечает голосом прямо во время
     # прослушивания, и конвейер обрабатывает реплику из LISTENING, а не

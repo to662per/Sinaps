@@ -85,6 +85,68 @@ async def say(pipe, text: str) -> None:
         await asyncio.sleep(0)
 
 
+# --- «прослушать пример» -----------------------------------------------------
+
+
+async def test_speak_now_says_without_a_request(pipeline):
+    """Ассистент говорит сам, без реплики человека.
+
+    Кнопка «Прослушать пример» звала `speak_now`, которого не
+    существовало: единственное упоминание имени во всём проекте —
+    вызов, определения не было. Нажатие роняло обработчик с
+    AttributeError, и никто этого не видел, пока не прочитали.
+    """
+    pipe, responder, tts, _guard, _session = pipeline
+
+    assert await pipe.speak_now("Проверка голоса") is True
+    assert tts.spoken == ["Проверка голоса"]
+
+
+async def test_speak_now_does_not_invent_dialogue(pipeline):
+    """Самостоятельная фраза не попадает в разбор команд и историю.
+
+    Обход через `handle_text_input` создал бы реплику, которой человек
+    не говорил, и метрику ответа, которой не было: в истории появился
+    бы вопросительный диалог без вопроса.
+    """
+    pipe, responder, tts, _guard, _session = pipeline
+
+    await pipe.speak_now("Проверка голоса")
+
+    assert responder.seen == [], "фраза без запроса дошла до разбора"
+    assert pipe.history == [], "фраза без запроса попала в историю"
+
+
+async def test_speak_now_reports_failure(pipeline):
+    """Неудача озвучки видна вызывающему, а не теряется.
+
+    Вызывающий — кнопка в настройках: человек должен увидеть, что
+    ничего не прозвучало.
+    """
+    pipe, _responder, tts, _guard, _session = pipeline
+
+    class BrokenTTS:
+        name = "сломанный"
+
+        async def speak(self, text, player=None):
+            raise RuntimeError("динамик молчит")
+
+        async def stop(self):
+            pass
+
+    pipe.tts = BrokenTTS()
+
+    assert await pipe.speak_now("Проверка голоса") is False
+
+
+async def test_speak_now_ignores_empty_phrase(pipeline):
+    """Пустая фраза не озвучивается и не падает."""
+    pipe, _responder, tts, _guard, _session = pipeline
+
+    assert await pipe.speak_now("   ") is False
+    assert tts.spoken == []
+
+
 # --- ответ на вопрос ---------------------------------------------------------
 
 

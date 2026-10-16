@@ -249,10 +249,18 @@ class ConversationPipeline:
         log_dialogue_guard(message)
         return Reply(speech=message, display=message)
 
-    async def _say(self, reply: Reply, *, turn: TurnMetrics | None, source: str) -> None:
+    async def _say(self, reply: Reply, *, turn: TurnMetrics | None,
+                source: str) -> bool:
+        """Произнести ответ. `True`, если фраза озвучена.
+
+        Возвращаемое значение нужно `speak_now`: вызывающий — кнопка
+        в настройках, и «ничего не прозвучало» ей надо показать. Раньше
+        сбой озвучки глотался внутри, и снаружи всё выглядело как
+        успех.
+        """
         text = reply.speech.strip()
         if not text:
-            return
+            return False
 
         log_assistant(text)
         await self.bus.emit(EventType.RESPONSE_READY, text=text,
@@ -260,11 +268,16 @@ class ConversationPipeline:
 
         if not self.speak_enabled:
             turn and turn.mark("first_audio")
-            return
+            return False
 
         self._speaking = True
         await self.session.transition(State.SPEAKING, reason="reply")
         await self.bus.emit(EventType.TTS_STARTED, text=text)
+        # Инициализация обязательна: присваивание `played` может не
+        # дойти (движок не ждёт, устройство недоступно), а `return
+        # played` ниже тогда роняет обратный вызов NameError вместо
+        # тихого «не прозвучало».
+        played = False
         try:
             played = await self.tts.speak(text, self.player)
             # Отметка «первый звук» — даже если звука не было, это честная
@@ -280,8 +293,35 @@ class ConversationPipeline:
         finally:
             self._speaking = False
             await self.bus.emit(EventType.TTS_FINISHED, text=text)
+        return played
 
     # --- управление -------------------------------------------------------
+
+    async def speak_now(self, text: str) -> bool:
+        """Сказать фразу без реплики человека.
+
+        Нужна кнопке «Прослушать пример» в настройках и понадобится
+        плагинам вроде таймера: до этого момента единственным путём
+        было `respond()`, то есть заговорить можно было только в ответ
+        на услышанное.
+
+        Обход идёт через `_say`, а не через `handle_text_input`:
+        текстовый вход создал бы в истории реплику, которой человек не
+        говорил, и метрику ответа, которой не было.
+
+        Возвращает `False`, если сказать не вышло: вызывающий — это
+        кнопка в настройках, и «ничего не прозвучало» ей надо показать,
+        а не проглотить.
+        """
+        phrase = (text or "").strip()
+        if not phrase:
+            return False
+        try:
+            return await self._say(Reply(speech=phrase), turn=None,
+                                    source="manual")
+        except Exception as exc:  # noqa: BLE001 — голос не должен ронять поток
+            log.error("Не удалось произнести фразу: %s", exc)
+            return False
 
     async def stop_speaking(self) -> None:
         """Замолчать немедленно (кнопка «стоп» в трее)."""

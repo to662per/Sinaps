@@ -94,8 +94,14 @@ async def test_bus_recent_filters_by_type():
 @pytest.mark.asyncio
 async def test_session_rejects_illegal_transition():
     session = SessionController(EventBus())
+    # Раньше примером был переход IDLE -> SPEAKING. Он стал законным:
+    # ассистент говорит сам, без реплики («Прослушать пример», сработавший
+    # таймер). Пример заменён на переход, который остался незаконным:
+    # из TRANSCRIBING говорить нельзя, сначала надо понять, что сказано.
+    await session.transition(State.LISTENING, reason="слушаем")
+    await session.transition(State.TRANSCRIBING, reason="распознаём")
     with pytest.raises(InvalidTransition):
-        await session.transition(State.SPEAKING, reason="из IDLE нельзя")
+        await session.transition(State.SPEAKING, reason="из распознавания говорить нельзя")
 
 
 @pytest.mark.asyncio
