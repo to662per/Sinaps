@@ -93,6 +93,14 @@ class SingleInstance:
         else:
             acquired = self._acquire_file()
 
+        # Одна строка, которая отвечает на вопрос «сработала ли защита».
+        # Пока её не было, «защита есть» и «второй экземпляр всё равно
+        # запустился» выглядели одинаково — и в журнале не оставалось
+        # ничего, кроме догадок.
+        log.info("Защита от второй копии: захват %s (%s)",
+                 "получен" if acquired else "отказ, уже работает",
+                 self._key)
+
         if acquired:
             return None
         return RunningInstance(pid=self._read_pid())
