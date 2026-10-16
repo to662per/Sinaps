@@ -17,7 +17,7 @@ import pytest
 pytest.importorskip("PySide6")
 
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox,
-                               QDoubleSpinBox, QSpinBox)
+                               QDoubleSpinBox, QLabel, QSpinBox)
 
 from sinaps.core.config import SinapsConfig
 from sinaps.memory.store import MemoryStore
@@ -1023,6 +1023,161 @@ def _pump(app, *, seconds: float) -> None:
     while time.monotonic() < deadline:
         app.processEvents()
         time.sleep(0.02)
+
+
+def test_autostart_section_exists(app):
+    """Автозапуск доступен мышью.
+
+    Он жил в отдельном окне `SettingsWindow`; когда то окно убрали в
+    пользу вкладки, переключатель уехал бы вместе с ним, и настройку
+    стало бы негде включить — регресс, который виден только тому, кто
+    ею пользуется.
+    """
+    view = SettingsView()
+
+    box = view._autostart_box
+    assert box is not None, "раздела «Система» нет"
+
+    row = view._rows["system.autostart"]
+    captions = [node.text() for node in row.findChildren(QLabel)]
+    assert "Автозапуск" in captions, captions
+
+
+def test_autostart_reflects_registry_state(app, monkeypatch):
+    """Галочка показывает настоящее состояние реестра."""
+    from sinaps.platform import autostart as autostart_module
+
+    monkeypatch.setattr(autostart_module, "is_enabled", lambda: True)
+    view = SettingsView()
+    view.set_autostart(view.autostart_enabled())
+    assert view._autostart_box.isChecked()
+
+    monkeypatch.setattr(autostart_module, "is_enabled", lambda: False)
+    view.set_autostart(view.autostart_enabled())
+    assert not view._autostart_box.isChecked()
+
+
+def test_autostart_writes_to_registry(app, monkeypatch):
+    """Включение галочки пишет в реестр."""
+    from sinaps.platform import autostart as autostart_module
+
+    written: list[bool] = []
+    monkeypatch.setattr(autostart_module, "set_enabled",
+                        lambda on: written.append(on) or True)
+
+    view = SettingsView()
+    view._autostart_box.setChecked(True)
+
+    assert written == [True]
+
+
+def test_autostart_rolls_back_when_registry_refuses(app, monkeypatch):
+    """Отказ реестра откатывает галочку.
+
+    Галочка, которая осталась включённой при неудачной записи, врёт:
+    человек ждёт автозапуска, а его не будет. Молча откатиться нельзя
+    — тогда человек решит, что автозапуск есть, и не станет проверять.
+    """
+    from sinaps.platform import autostart as autostart_module
+
+    def _refuse(on: bool) -> bool:
+        raise PermissionError("нет прав на реестр")
+
+    monkeypatch.setattr(autostart_module, "set_enabled", _refuse)
+
+    view = SettingsView()
+    view._autostart_box.setChecked(True)
+
+    assert not view._autostart_box.isChecked(), (
+        "галочка осталась включённой при отказе реестра")
+    assert "реестр" in view.system_notice, view.system_notice
+
+
+def test_autostart_notice_survives_failed_write(app, monkeypatch):
+    """Человеку сказано, что именно не вышло."""
+    from sinaps.platform import autostart as autostart_module
+
+    monkeypatch.setattr(autostart_module, "set_enabled", lambda on: False)
+
+    view = SettingsView()
+    view._autostart_box.setChecked(True)
+
+    assert view.system_notice, "о неудаче никто не сказал"
+
+
+def test_autostart_showing_state_does_not_write(app, monkeypatch):
+    """Показ состояния при открытии не пишет в реестр.
+
+    Иначе окно при каждом открытии переписывало бы автозапуск — и
+    человек, который его выключил, обнаружил бы, что тот включился
+    сам при следующем запуске ассистента.
+    """
+    from sinaps.platform import autostart as autostart_module
+
+    written: list[bool] = []
+    monkeypatch.setattr(autostart_module, "is_enabled", lambda: True)
+    monkeypatch.setattr(autostart_module, "set_enabled",
+                        lambda on: written.append(on) or True)
+
+    view = SettingsView()
+    view.set_autostart(view.autostart_enabled())
+
+    assert written == [], f"показ состояния записал в реестр: {written}"
+
+
+def test_autostart_does_not_emit_config_path(app, monkeypatch):
+    """Переключатель автозапуска не шлёт путь конфигурации.
+
+    Автозапуска в `config.yaml` нет: он живёт в реестре. Если бы строка
+    шла через общий путь правки, она бы искала несуществующее поле в
+    `SinapsConfig` и ругалась бы в уведомлении на каждый щелчок.
+    """
+    from sinaps.platform import autostart as autostart_module
+
+    monkeypatch.setattr(autostart_module, "set_enabled", lambda on: True)
+
+    view = SettingsView()
+    emitted: list[tuple] = []
+    view.changed.connect(lambda p, v: emitted.append((p, v)))
+
+    view._autostart_box.setChecked(True)
+
+    assert not [p for p, _ in emitted if p.startswith("system.")], (
+        f"автозапуск пошёл по пути конфигурации: {emitted}")
+
+
+def test_tray_settings_opens_main_window_tab(app):
+    """Пункт «Настройки» в трее открывает вкладку окна.
+
+    Раньше он открывал отдельное окно `SettingsWindow`. Два места для
+    одних и тех же настроек хуже одного: правка в одном месте не
+    видна в другом, и человек не понимает, какое из них главное.
+    """
+    from sinaps.core.config import SinapsConfig
+    from sinaps.ui.qt_host import QtHost, _WindowBridge
+
+    host = QtHost.__new__(QtHost)
+    host.cfg = SinapsConfig()
+    host.cfg_path = None
+    host.app = QApplication.instance()
+    host.tray = None
+    host.main_window = None
+    host.panel = None
+    host._store = None
+    host._runtime = None
+    host._paused = False
+    host._speak_enabled = True
+    host._state = "idle"
+    host.console = False
+    host._window_bridge = _WindowBridge()
+    host._window_bridge.call.connect(lambda action: action())
+    host.loop = None
+
+    host._show_settings()
+
+    assert host.main_window is not None, "главное окно не открылось"
+    assert host.main_window._buttons["settings"].isChecked(), (
+        "открылась не вкладка «Настройки»")
 
 
 def test_missing_value_is_left_alone(app):

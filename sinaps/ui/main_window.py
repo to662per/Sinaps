@@ -370,6 +370,7 @@ class MainWindow(QWidget):
     def set_settings(self, config) -> None:
         """Показать настройки из конфигурации."""
         self._settings.load(config)
+        self._settings.set_autostart(self._settings.autostart_enabled())
 
     def set_devices(self, inputs=None, outputs=None) -> None:
         """Показать микрофоны и динамики."""

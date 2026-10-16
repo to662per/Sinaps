@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox,
                                QFrame, QHBoxLayout, QLabel, QPushButton,
@@ -30,6 +32,8 @@ RESTART_ONLY = frozenset({
 #: а не по точному совпадению: `stt.model_size` имеет право быть
 #: настройкой с перезапуском так же, как `stt.model`.
 RESTART_MARKERS = ("stt.", "audio.input_device", "audio.output_device")
+
+log = logging.getLogger(__name__)
 
 
 class _Row(QWidget):
@@ -91,6 +95,11 @@ class SettingsView(QWidget):
         super().__init__(parent)
         self._rows: dict[str, _Row] = {}
         self._config = config
+        self._autostart_box: QCheckBox | None = None
+        #: Что сказать человеку о последней попытке. Пусто — сказать
+        #: нечего, и пустая плашка не мигает при каждом переключении
+        #: любой другой настройки.
+        self.system_notice = ""
         self._build()
 
     def set_devices(self, inputs=None, outputs=None) -> None:
@@ -149,6 +158,7 @@ class SettingsView(QWidget):
         column.addWidget(self._understanding_rows_section())
         column.addWidget(self._section("Активация", self._activation_rows()))
         column.addWidget(self._section("Приватность", self._privacy_rows()))
+        column.addWidget(self._section("Система", self._system_rows()))
         column.addWidget(self._plugins_note())
         column.addStretch(1)
 
@@ -466,6 +476,88 @@ class SettingsView(QWidget):
 
         self._register(rows)
         return rows
+
+    def _system_rows(self) -> list:
+        """Системные переключатели, которых нет в `config.yaml`.
+
+        Автозапуск живёт в реестре, а не в файле конфигурации, поэтому
+        строки здесь идут вне `_rows`: иначе правка пыталась бы писать
+        в `SinapsConfig` поле, которого там нет, и путь «system.*» был
+        бы фикцией.
+        """
+        rows = []
+
+        autostart = QCheckBox("запускать вместе с Windows")
+        autostart.setFont(font(9))
+        autostart.setStyleSheet(label(size=9))
+        self._autostart_box = autostart
+        rows.append(_Row("system.autostart", "Автозапуск", autostart,
+                         "запись в реестр; при отказе галочка откатится"))
+
+        autostart.toggled.connect(self._on_autostart_toggled)
+
+        rows.append(_Row("system.logs", "Журнал", QLabel(""), ""))
+
+        # Кладём в `_rows` вручную, а не через `_register`: регистр
+        # делает ту же работу, но `_register` ещё и привязывает
+        # `settings_changed` с путём конфигурации, а у автозапуска
+        # такого пути нет — он не в `config.yaml`.
+        for row in rows:
+            self._rows[row.path] = row
+
+        return rows
+
+    def _on_autostart_toggled(self, checked: bool) -> None:
+        """Записать автозапуск или честно откатить галочку.
+
+        Реестр может быть недоступен: нет прав, политика организации.
+        Галочка, которая осталась включённой при неудачной записи,
+        врёт — человек ждёт запуска, а его не будет.
+        """
+        try:
+            from ..platform import autostart as autostart_module
+
+            ok = autostart_module.set_enabled(checked)
+        except Exception as exc:                       # noqa: BLE001
+            log.warning("Автозапуск недоступен: %s", exc)
+            ok = False
+
+        if ok:
+            self.system_notice = (
+                "Автозапуск включён." if checked else "Автозапуск выключен.")
+            return
+
+        self._rollback_autostart()
+        self.system_notice = (
+            "Запись в реестр не удалась: автозапуск не изменился.")
+
+    def _rollback_autostart(self) -> None:
+        box = self._autostart_box
+        if box is None or not box.isChecked():
+            return
+        box.blockSignals(True)
+        box.setChecked(False)
+        box.blockSignals(False)
+
+    def autostart_enabled(self) -> bool:
+        """Текущее состояние автозапуска — для показа при открытии."""
+        try:
+            from ..platform import autostart as autostart_module
+
+            return bool(autostart_module.is_enabled())
+        except Exception:                              # noqa: BLE001
+            log.warning("Не удалось прочитать состояние автозапуска",
+                        exc_info=True)
+            return False
+
+    def set_autostart(self, checked: bool) -> None:
+        """Показать состояние без попытки записи в реестр."""
+        box = self._autostart_box
+        if box is None:
+            return
+        box.blockSignals(True)
+        box.setChecked(bool(checked))
+        box.blockSignals(False)
 
     def _plugins_note(self) -> QWidget:
         """Указание на раздел «Плагины».

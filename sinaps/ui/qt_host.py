@@ -113,8 +113,6 @@ class QtHost:
 
         self.app = None
         self.tray = None
-        self.history_window = None
-        self.settings_window = None
         self.panel = None
         self.main_window = None
 
@@ -939,23 +937,18 @@ class QtHost:
             self.main_window.show_section("history")
 
     def _show_settings(self) -> None:
-        from ..audio.devices import list_input_devices
-        from ..platform import autostart
-        from .windows import SettingsWindow
+        """Открыть настройки.
 
-        if self.settings_window is None:
-            self.settings_window = SettingsWindow(
-                self.cfg,
-                audio_devices=list_input_devices,
-                voices=self._voice_names,
-                on_apply=self._on_settings_apply,
-                autostart_state=autostart.is_enabled,
-                on_autostart=autostart.set_enabled,
-                cfg_path=self.cfg_path,
-            )
-        self.settings_window.show()
-        self.settings_window.raise_()
-        self.settings_window.activateWindow()
+        Ведёт на вкладку «Настройки» главного окна, а не в отдельное
+        окно `SettingsWindow` — по той же причине, что и в
+        `_show_history`. Настройки в том числе меняют автозапуск, за
+        который отвечал отдельный диалог, поэтому это единственное
+        место, где стартовое окно ещё используется: `_fill_settings`
+        вызывает его сам.
+        """
+        self._show_main_window()
+        if self.main_window is not None:
+            self.main_window.show_section("settings")
 
     @staticmethod
     def _voice_names() -> list[str]:
