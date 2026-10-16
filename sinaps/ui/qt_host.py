@@ -38,7 +38,29 @@ from ..core.config import save_config
 #: трей смотрели на один список: два перечня разъедутся за месяц.
 from .settings_view import RESTART_MARKERS
 
+from PySide6.QtCore import QObject, Signal
+
 log = logging.getLogger(__name__)
+
+
+class _WindowBridge(QObject):
+    """Мост из asyncio-потока в Qt-поток для обновления окна.
+
+    Отдельный объект, а не `Bridge` из трея: трей может не создаться
+    (в тестах и там, где системного трея нет), а окно обновлять всё
+    равно придётся.
+
+    Сигнал вместо `QTimer.singleShot` — не украшение, а требование Qt:
+    таймер создаётся в том потоке, из которого вызван, и из
+    asyncio-потока, где Qt-цикла нет, он просто не срабатывает. Ни
+    ошибки, ни в��лога: окно молча остаётся прежним.
+
+    Ровно это и происходило. История писалась в базу, а вкладка
+    «История» в окне оставалась пустой — при этом прямое присваивание
+    работало, и проверка в тесте с главным потоком проходила.
+    """
+
+    call = Signal(object)
 
 #: Сколько ждём готовности ассистента, прежде чем показать трей.
 STARTUP_TIMEOUT_S = 90.0
@@ -106,6 +128,7 @@ class QtHost:
         self._speak_enabled = True
         self._store = None
         self._state = "idle"
+        self._window_bridge: _WindowBridge | None = None
 
     # --- запуск -----------------------------------------------------------
 
@@ -132,6 +155,11 @@ class QtHost:
 
         self.tray = TrayIcon()
         self.tray.show()
+
+        # Мост создаётся здесь, в Qt-потоке, и только здесь: QObject
+        # нельзя создавать до QApplication, а слот — в другом потоке.
+        self._window_bridge = _WindowBridge()
+        self._window_bridge.call.connect(lambda action: action())
 
         self._connect_tray()
 
@@ -536,13 +564,20 @@ class QtHost:
         зависанием или порчей соединения sqlite.
         """
         if self._store is None:
+            log.warning("История: хранилище недоступно")
             self._notify("История", "Хранилище недоступно")
             return
+
+        log.info("История: запрос %r", filters)
 
         async def _load() -> None:
             entries = self._store.history(**filters)
             stats = self._store.history_stats()
             summary = f"показано {len(entries)}"
+            # Без этой строки в логе пустой список неотличим от
+            # «запрос не дошёл»: и то, и другое выглядит одинаково —
+            # пустая вкладка. С этим видно, где обрыв.
+            log.info("История: показано записей %d", len(entries))
             self._post_to_window(
                 lambda: self.main_window.set_history(entries, stats, summary))
 
@@ -671,10 +706,16 @@ class QtHost:
         app = self.app
         if app is None:
             return
+        bridge = self._window_bridge
+        if bridge is None:
+            # Окно ещё не создано: обновлять нечего. Раньше здесь
+            # стоял `QTimer.singleShot(0, action)`, который из
+            # asyncio-потока не срабатывает вообще — молча, без
+            # ошибки и без записи в лог.
+            log.debug("Окно ещё не готово — обновление пропущено")
+            return
         try:
-            from PySide6.QtCore import QTimer
-
-            QTimer.singleShot(0, action)
+            bridge.call.emit(action)
         except Exception:                             # noqa: BLE001
             log.exception("Не удалось обновить окно")
 
@@ -884,16 +925,18 @@ class QtHost:
         self._call_async(_activate)
 
     def _show_history(self) -> None:
-        from .windows import HistoryWindow
+        """Открыть историю.
 
-        if self.history_window is None:
-            if self._store is None:
-                self._notify("История", "Хранилище недоступно.")
-                return
-            self.history_window = HistoryWindow(self._store)
-        self.history_window.show()
-        self.history_window.raise_()
-        self.history_window.activateWindow()
+        Ведёт в главное окно на вкладку «История», а не в отдельное
+        окно `HistoryWindow`. Два места для одного и того же хуже
+        одного: старое окно работало, а вкладка молча показывала
+        пустоту, и человек решил, что история пишется «куда-то» и
+        пропадает. Раз история удалена из старого места, и в трее
+        должен быть тот же путь, что и в окне.
+        """
+        self._show_main_window()
+        if self.main_window is not None:
+            self.main_window.show_section("history")
 
     def _show_settings(self) -> None:
         from ..audio.devices import list_input_devices

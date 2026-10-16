@@ -899,6 +899,41 @@ def test_open_window_loads_history(app, store):
     assert asked, "окно из трея не спросило историю"
 
 
+def test_tray_history_opens_main_window_tab(app, store):
+    """Пункт «История» в трее открывает вкладку, а не отдельное окно.
+
+    Старое `HistoryWindow` работало, а вкладка в главном окне молча
+    показывала пустоту. Два места для одного и того же хуже одного:
+    человек видел историю в одном месте и не верил второму.
+    """
+    from sinaps.core.config import SinapsConfig
+    from sinaps.ui.qt_host import QtHost, _WindowBridge
+
+    host = QtHost.__new__(QtHost)
+    host.cfg = SinapsConfig()
+    host.cfg_path = None
+    host.app = QApplication.instance()
+    host.tray = None
+    host.main_window = None
+    host.history_window = object()      # раньше здесь было старое окно
+    host.settings_window = None
+    host._store = store
+    host._runtime = None
+    host._paused = False
+    host._speak_enabled = True
+    host._state = "idle"
+    host.console = False
+    host._window_bridge = _WindowBridge()
+    host._window_bridge.call.connect(lambda action: action())
+    host.loop = None                     # цикл не нужен: только маршрут
+
+    host._show_history()
+
+    assert host.main_window is not None, "главное окно не открылось"
+    assert host.main_window._buttons["history"].isChecked(), (
+        "открылась не вкладка «История»")
+
+
 def test_history_loads_when_tab_shown(app, store):
     """История загружается при показе вкладки, а не только при открытии окна.
 
@@ -918,6 +953,76 @@ def test_history_loads_when_tab_shown(app, store):
 
     assert asked, "переключение на историю не спросило базу"
     assert asked[-1]["query"] == ""
+
+
+def test_history_reaches_window_from_asyncio_thread(app, store):
+    """История доходит до окна из отдельного потока asyncio.
+
+    Раньше обновление окна делалось через `QTimer.singleShot(0, ...)`,
+    вызванный из asyncio-потока. Такой таймер создаётся в том потоке,
+    из которого вызван, и в чужом потоке без Qt-цикла не срабатывает —
+    молча, без ошибки и без записи в лог. История писалась в базу, а
+    вкладка оставалась пустой.
+
+    Тест повторяет настоящее устройство: цикл asyncio в отдельном
+    потоке, как в работающем ассистенте. Проверка с циклом в
+    главном потоке проходила и с поломанным кодом — именно поэтому
+    ошибка прожила незамеченной.
+    """
+    import asyncio
+    import threading
+
+    from sinaps.core.config import SinapsConfig
+    from sinaps.ui.qt_host import QtHost, _WindowBridge
+
+    store.add_dialogue("user", "проверка из потока")
+    store.add_dialogue("assistant", "ответ из потока")
+
+    host = QtHost.__new__(QtHost)
+    host.cfg = SinapsConfig()
+    host.cfg_path = None
+    host.app = QApplication.instance()
+    host.tray = None
+    host.main_window = None
+    host.history_window = None
+    host.settings_window = None
+    host._store = store
+    host._runtime = None
+    host._paused = False
+    host._speak_enabled = True
+    host._state = "idle"
+    host.console = False
+
+    host._window_bridge = _WindowBridge()
+    host._window_bridge.call.connect(lambda action: action())
+
+    host.loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=host.loop.run_forever, daemon=True)
+    thread.start()
+    try:
+        host._show_main_window()
+        _pump(app, seconds=3.0)
+
+        assert host.main_window._history._list.count() == len(store.history()), (
+            "окно не показало историю из потока asyncio")
+
+        host.main_window._history.set_entries([])
+        host.main_window._buttons["history"].click()
+        _pump(app, seconds=3.0)
+
+        assert host.main_window._history._list.count() == len(store.history()), (
+            "клик по вкладке не обновил список из потока asyncio")
+    finally:
+        host.loop.call_soon_threadsafe(host.loop.stop)
+        thread.join(timeout=5)
+
+
+def _pump(app, *, seconds: float) -> None:
+    """Дать Qt обработать очередь сигналов."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.02)
 
 
 def test_missing_value_is_left_alone(app):
