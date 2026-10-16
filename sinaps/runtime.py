@@ -230,12 +230,16 @@ class Runtime:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
+            # Нет цикла — слежение не поднимется, и никто об этом не
+            # узнает: микрофон просто не появится, а в журнале пусто.
+            log.warning("Слежение за микрофоном не запущено: нет цикла событий")
             return
         self._mic_watcher = loop.create_task(
             self._watch_microphone_forever(), name="sinaps-mic-watch")
 
     async def _watch_microphone_forever(self) -> None:
         """Ждать микрофон и достроить контур, когда он появится."""
+        log.info("Жду микрофон — подключите его, контур поднимется сам")
         while self.listener is None:
             await asyncio.sleep(MIC_WATCH_INTERVAL_S)
             try:
