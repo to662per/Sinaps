@@ -264,7 +264,26 @@ class QtHost:
         elif want_audio:
             self._notice = ""
 
-        return await build_assistant(self.cfg, with_audio=want_audio)
+        return await build_assistant(self.cfg, with_audio=want_audio,
+                                 notify_handler=self._on_plugin_notify)
+
+    def _on_plugin_notify(self, title: str, text: str) -> None:
+        """Плагин попросил показать уведомление — показываем и говорим.
+
+        Окно трея и голос здесь потому, что таймеру нечем иначе себя
+        проявить: реплики человека не будет, а молча сработавший таймер
+        человек считает сломанным.
+
+        Ошибка озвучки гасится: уведомление на экране уже показано, и
+        падать из-за динамиков нельзя — иначе плагин потеряет очередь.
+        """
+        log.info("Плагин просит уведомление: %s", title)
+        self._notify(title, text)
+
+        runtime = self._runtime
+        if runtime is None:
+            return
+        self._call_async(lambda: runtime.conversation.speak_now(text))
 
     def _want_audio(self) -> bool:
         return not self._no_audio

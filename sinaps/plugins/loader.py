@@ -786,7 +786,9 @@ async def load_plugin(folder: str | Path, registry: SkillRegistry,
 
 async def reload_plugin(plugin: LoadedPlugin, folder: str | Path,
                         registry: SkillRegistry,
-                        bus: "EventBus | None" = None) -> LoadedPlugin:
+                        bus: "EventBus | None" = None,
+                        notify_handler: Callable[[str, str], None] | None = None
+                        ) -> LoadedPlugin:
     """Перезагрузить плагин на ходу, не трогая ассистент.
 
     Порядок именно такой: сначала убрать старые команды из реестра,
@@ -808,7 +810,8 @@ async def reload_plugin(plugin: LoadedPlugin, folder: str | Path,
     plugin.process = None
     plugin.holder = None
 
-    fresh = await load_plugin(folder, registry, bus=bus)
+    fresh = await load_plugin(folder, registry, bus=bus,
+                          notify_handler=notify_handler)
     if not fresh.commands:
         raise ManifestError(f"{folder}: после перезагрузки нет ни одной команды")
 

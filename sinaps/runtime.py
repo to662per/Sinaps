@@ -77,6 +77,11 @@ class Runtime:
     #: Задача, ждущая микрофон, если его не было при старте.
     _mic_watcher: asyncio.Task | None = None
 
+    #: Куда плагины шлют просьбу показать уведомление (право `notify`).
+    #: Приходит из приложения при сборке и хранится здесь, чтобы
+    #: перезагрузка плагина не теряла его.
+    notify_handler: Callable[[str, str], None] | None = None
+
     #: Плагины, выключенные пользователем. Их команды убраны из
     #: реестра, поэтому перезагрузка их не запустит.
     disabled_plugins: set[str] = field(default_factory=set)
@@ -358,7 +363,8 @@ class Runtime:
             return False
 
         try:
-            fresh = await reload_plugin(plugin, folder, self.registry, self.bus)
+            fresh = await reload_plugin(plugin, folder, self.registry, self.bus,
+                                       notify_handler=self.notify_handler)
         except Exception as exc:  # noqa: BLE001 — чужая папка с чужим кодом
             log.error("Перезагрузка плагина %s не удалась: %s: %s",
                       name, type(exc).__name__, exc)
@@ -685,13 +691,16 @@ def _make_memory(cfg: SinapsConfig):
 
 
 def build_assistant(cfg: SinapsConfig | None = None, *,
-                    with_audio: bool = True) -> Runtime:
+                    with_audio: bool = True,
+                    notify_handler: Callable[[str, str], None] | None = None
+                    ) -> Runtime:
     """Готовая сборка для интерактивной работы: навыки + аудио.
 
     Существует, чтобы ни консольный запуск, ни трей не занимались
     сборкой графа: правило проекта — это делает только `runtime.py`.
     """
-    return build_skills_runtime(cfg or get_config(), with_audio=with_audio)
+    return build_skills_runtime(cfg or get_config(), with_audio=with_audio,
+                                notify_handler=notify_handler)
 
 
 async def build_skills_runtime(
@@ -795,6 +804,7 @@ async def build_skills_runtime(
         capture=capture, player=player, stt=stt, tts=tts,
         listener=listener, conversation=conversation,
         registry=registry, platform=platform, trigger=trigger,
+        notify_handler=notify_handler,
         plugins=load_report, _plugin_guard=guard,
     )
 

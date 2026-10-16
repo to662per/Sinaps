@@ -296,15 +296,18 @@ def test_build_runtime_passes_the_report():
     подставляют отчёт руками и такой обрыв не заметят, поэтому он ловится
     отдельно.
 
-    Аргументы вызова лежат в `co_consts` кортежем имён. Полная сборка
-    рантайма не проверяется: она тянет модели.
+    Источник смотрим, а не байт-код: имена аргументов вызова лежат в
+    `co_consts` не всегда одинаково, и проверка ломалась от посторонней
+    правки — от добавления соседнего аргумента, а не от потери отчёта.
+    Полная сборка рантайма не проверяется: она тянет модели.
     """
+    import inspect
+
     from sinaps.runtime import build_skills_runtime
 
-    kwargs = [c for c in build_skills_runtime.__code__.co_consts
-              if isinstance(c, tuple) and "plugins" in c]
+    source = inspect.getsource(build_skills_runtime)
 
-    assert kwargs, (
+    assert "plugins=" in source, (
         "сборщик рантайма не передаёт отчёт о плагинах в Runtime — "
         "уборка и закрытие процессов останутся неприделанными")
 
