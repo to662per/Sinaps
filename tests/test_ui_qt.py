@@ -191,44 +191,117 @@ class TestAutostart:
         yield
         autostart.disable(tmp_path)
 
-    def test_disabled_by_default(self, tmp_path):
+    @pytest.fixture
+    def project_root(self, tmp_path):
+        """Папка «проекта» с настоящим лаунчером.
+
+        Без файла запуска автозапуск честно отказывает — и проверять
+        тут надо именно включение и выключение, а не отказ, который
+        проверяется отдельно.
+        """
+        (tmp_path / "run_sinaps_silent.vbs").write_text(
+            "' test launcher\n", encoding="utf-8")
+        return tmp_path
+
+    def test_disabled_by_default(self, project_root):
         from sinaps.platform import autostart
 
-        assert autostart.is_enabled(tmp_path) is False
+        assert autostart.is_enabled(project_root) is False
 
-    def test_enable_disable_roundtrip(self, tmp_path):
+    def test_enable_disable_roundtrip(self, project_root):
         from sinaps.platform import autostart
 
-        assert autostart.enable(tmp_path) is True
-        assert autostart.is_enabled(tmp_path) is True
-        assert autostart.disable(tmp_path) is True
-        assert autostart.is_enabled(tmp_path) is False
+        assert autostart.enable(project_root) is True
+        assert autostart.is_enabled(project_root) is True
+        assert autostart.disable(project_root) is True
+        assert autostart.is_enabled(project_root) is False
 
-    def test_disabling_absent_entry_is_success(self, tmp_path):
+    def test_disabling_absent_entry_is_success(self, project_root):
         """Выключить то, чего нет — не ошибка: цель уже достигнута."""
         from sinaps.platform import autostart
 
-        assert autostart.disable(tmp_path) is True
+        assert autostart.disable(project_root) is True
 
-    def test_set_enabled(self, tmp_path):
+    def test_set_enabled(self, project_root):
         from sinaps.platform import autostart
 
-        assert autostart.set_enabled(True, tmp_path) is True
-        assert autostart.is_enabled(tmp_path) is True
-        assert autostart.set_enabled(False, tmp_path) is True
-        assert autostart.is_enabled(tmp_path) is False
+        assert autostart.set_enabled(True, project_root) is True
+        assert autostart.is_enabled(project_root) is True
+        assert autostart.set_enabled(False, project_root) is True
+        assert autostart.is_enabled(project_root) is False
 
-    def test_command_points_at_interpreter_without_console(self):
-        """Без `pythonw` в автозапуске пользователь получит чёрное окно."""
+    def test_written_entry_matches_launcher_path(self, project_root):
+        """Запись в реестре указывает на файл, который реально есть.
+
+        Ссылка на несуществующий файл выглядит в реестре совершенно
+        обычно, и «включено» в настройках совпадает с «включено» в
+        системе — а запуска по-прежнему не происходит.
+        """
+        import winreg
+
+        from sinaps.platform import autostart
+
+        autostart.enable(project_root)
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            autostart._RUN_KEY) as key:   # noqa: SLF001
+            value, _ = winreg.QueryValueEx(
+                key, autostart._value_name(project_root))  # noqa: SLF001
+
+        assert str(project_root / "run_sinaps_silent.vbs") in value
+
+    def test_command_runs_through_project_launcher(self):
+        """Запись автозапуска идёт через лаунчер проекта.
+
+        Раньше писалось `pythonw.exe -m sinaps --tray`. При входе в
+        Windows рабочий каталог — `C:\Windows\System32`, `-m` ищет
+        пакет там, проект не установлен в `site-packages`, и запуск
+        заканчивался `No module named sinaps` с кодом 1. Консоли под
+        pythonw нет, поэтому человек видел только «галочка включена,
+        ассистент не запускается».
+
+        Строка с `pythonw` и `-m sinaps` здесь и была причиной.
+        """
         from sinaps.platform import autostart
 
         command = autostart._command()      # noqa: SLF001
-        assert "-m sinaps" in command
-        assert "pythonw" in command.lower(), f"команда {command!r} откроет консоль"
+
+        assert "-m sinaps" not in command, (
+            f"команда {command!r} не работает из System32")
+        assert "run_sinaps_silent.vbs" in command
         assert '"' in command, "путь с пробелами должен быть в кавычках"
 
-    def test_command_starts_tray_mode(self):
-        """Без `--tray` автозапуск поднимает консольный режим.
+    def test_command_runs_launcher_without_console_window(self):
+        """Без `wscript.exe` окно консоли мелькнёт при каждом входе.
+
+        Само по себе это не поломка, но выглядит как ошибка, и человек
+        начинает искать причину, которой нет.
+        """
+        from sinaps.platform import autostart
+
+        command = autostart._command()      # noqa: SLF001
+
+        assert command.lower().startswith("wscript.exe"), command
+
+    def test_launcher_switches_to_project_folder(self):
+        """Лаунчер возвращает рабочий каталог в папку проекта.
+
+        Это и есть недостающая часть: без неё `-m sinaps` ищет пакет в
+        System32. Проверяется содержимое `.bat`, а не вид команды в
+        реестре — сломанная строка выглядит вполне правдоподобно.
+        """
+        from sinaps.platform import autostart
+
+        launcher = autostart.launcher_path()      # noqa: SLF001
+        assert launcher.exists(), f"нет файла запуска: {launcher}"
+
+        bat = launcher.with_name("run_sinaps_silent.bat").read_text(
+            encoding="utf-8")
+
+        assert "cd /d" in bat, "лаунчер не меняет рабочий каталог"
+
+    def test_launcher_starts_tray_mode(self):
+        """Лаунчер поднимает трей, а не консольный режим.
 
         Под pythonw окна консоли нет, интерактивный ввод недоступен —
         ассистент висит невидимым и не отвечает. При загрузке Windows
@@ -236,7 +309,23 @@ class TestAutostart:
         """
         from sinaps.platform import autostart
 
-        assert "--tray" in autostart._command()      # noqa: SLF001
+        launcher = autostart.launcher_path()      # noqa: SLF001
+        bat = launcher.with_name("run_sinaps_silent.bat").read_text(
+            encoding="utf-8")
+
+        assert "--tray" in bat
+
+    def test_enable_refuses_without_launcher(self, tmp_path):
+        """Без файла запуска автозапуск не включается.
+
+        Запись в реестре без лаунчера работает, но не запускается.
+        Хуже отказа: человек увидит включённую галочку и будет ждать
+        ассистент, которого не будет.
+        """
+        from sinaps.platform import autostart
+
+        assert autostart.enable(tmp_path) is False
+        assert autostart.is_enabled(tmp_path) is False
 
     def test_entry_name_is_stable_and_unique(self, tmp_path):
         """Две копии проекта не должны затирать записи друг друга."""

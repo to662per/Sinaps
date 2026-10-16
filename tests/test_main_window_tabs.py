@@ -1180,6 +1180,38 @@ def test_tray_settings_opens_main_window_tab(app):
         "открылась не вкладка «Настройки»")
 
 
+def test_vbs_launcher_is_self_consistent(app):
+    """VBS собран с теми же файлами, что и остальной проект.
+
+    Скрипт уже сломался однажды: `FileExists` при `Option Explicit`
+    трактуется как необъявленная переменная, скрипт падает, а cscript
+    возвращает 0 — автозапуск молча ничего не делает. Ни тест, ни
+    человек этого не замечают.
+    """
+    from sinaps.platform import autostart
+
+    launcher = autostart.launcher_path()      # noqa: SLF001
+    text = launcher.read_text(encoding="utf-8")
+
+    # Именно присваивание, а не любое упоминание: имя файла есть и в
+    # комментарии, и проверка по всему тексту прошла бы при сломанной
+    # строке запуска.
+    assign = [l.strip() for l in text.splitlines()
+              if l.strip().lower().startswith("launcher =")]
+    assert len(assign) == 1, f"строк запуска не одна: {assign}"
+    assert assign[0].endswith('"run_sinaps_silent.bat"'), (
+        f"запускается не тот файл: {assign[0]}")
+
+    assert "WScript.ScriptFullName" in text, (
+        "путь к лаунчеру зашит вместо вывода из расположения скрипта; "
+        "перенос папки сломает автозапуск")
+
+    # Идентификаторы под Option Explicit должны быть объявлены или
+    # принадлежать COM-объектам: `shell`, `fso`, `root`, `launcher`.
+    assert "Option Explicit" in text
+    assert "Dim " in text and "fso" in text, "не объявлен fso"
+
+
 def test_missing_value_is_left_alone(app):
     """Отсутствующее значение не заменяется нулём.
 

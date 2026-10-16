@@ -26,7 +26,7 @@ _RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 def _value_name(project_root: Path | None = None) -> str:
     """Имя записи. Несколько копий проекта не должны затирать друг друга."""
-    root = Path(project_root) if project_root else Path(__file__).resolve().parent.parent.parent
+    root = _root(project_root)
     # Хэш пути: два проекта в разных папках получат разные записи.
     import hashlib
 
@@ -47,18 +47,35 @@ def _pythonw() -> str:
     return ""
 
 
+def _root(project_root: Path | None = None) -> Path:
+    return (Path(project_root) if project_root
+            else Path(__file__).resolve().parent.parent.parent)
+
+
+def launcher_path(project_root: Path | None = None) -> Path:
+    """Файл, который на самом деле запускает ассистента при входе.
+
+    Отдельный файл, а не строка с `pythonw -m sinaps`, потому что
+    строка не работает: при входе в Windows рабочий каталог равен
+    `C:\Windows\System32`, `-m` ищет пакет именно там, проект не
+    установлен в `site-packages`, и запуск заканчивается `No module
+    named sinaps`. Под `pythonw` консоли нет, поэтому это выглядело
+    как «настройка есть, ассистент не запускается».
+
+    `run_sinaps_silent.bat` начинается с `cd /d %~dp0` — это и есть
+    недостающая часть.
+    """
+    return _root(project_root) / "run_sinaps_silent.vbs"
+
+
 def _command(project_root: Path | None = None) -> str:
     """Полная строка запуска, которую записываем в реестр.
 
-    Обязателен `--tray`. Без него pythonw стартует консольный режим:
-    окна консоли нет, интерактивный ввод недоступен, и ассистент висит
-    невидимым. При старте Windows это выглядит как «программа запустилась
-    и молчит», хотя на самом деле сломана.
+    `wscript.exe` запускает `.bat` со скрытым окном: окно консоли,
+    мелькающее при каждом входе в Windows, выглядит как ошибка, даже
+    если всё работает.
     """
-    root = Path(project_root) if project_root else Path(__file__).resolve().parent.parent.parent
-    pythonw = _pythonw()
-    module = f'"{pythonw}"' if pythonw else f'"{sys.executable}" -w'
-    return f'{module} -m sinaps --tray'
+    return f'wscript.exe "{launcher_path(project_root)}"'
 
 
 def _winreg():
@@ -91,6 +108,14 @@ def enable(project_root: Path | None = None) -> bool:
     winreg = _winreg()
     if winreg is None:
         log.warning("Автозапуск доступен только в Windows")
+        return False
+
+    launcher = launcher_path(project_root)
+    if not launcher.exists():
+        # Запись без лаунчер�� работает, но не запускается: это хуже,
+        # чем отказ. Человек увидит включённую галочку и будет ждать
+        # ассистент, которого не будет.
+        log.warning("Автозапуск: нет файла запуска %s", launcher)
         return False
 
     command = _command(project_root)
