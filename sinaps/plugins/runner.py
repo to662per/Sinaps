@@ -207,6 +207,41 @@ class _StateProxy:
         return int(self._ask("clear") or 0)
 
 
+async def notify(text: str, *, title: str = "Sinaps") -> None:
+    """Показать уведомление и сказать вслух.
+
+    Право `notify` проверяется на стороне ядра, до показа: плагин без
+    разрешения получает отказ, а не тишину.
+
+    Такой вызов означает, что заговорить можно без реплики человека.
+    До этого движок отвечал только на услышанное, и таймер, сработав,
+    не мог себя проявить: некому было задать вопрос.
+    """
+    import sys
+
+    from ..core.errors import PermissionDenied, PluginError
+    from .protocol import (CAP_NOTIFY, OP_CAP, OP_CAP_FAIL, OP_CAP_OK,
+                           ProtocolError, read_message, write_message)
+
+    try:
+        write_message(sys.stdout.buffer, {
+            "op": OP_CAP, "cap": CAP_NOTIFY, "action": "notify",
+            "kwargs": {"text": text, "title": title}})
+    except ProtocolError as exc:
+        raise PluginError(
+            f"Уведомление: значение нельзя передать — {exc}",
+            speech="Плагин не смог показать уведомление") from exc
+
+    message = read_message(sys.stdin.buffer)
+    if message.get("op") == OP_CAP_OK:
+        return None
+
+    detail = message.get("message") or "уведомление не показано"
+    if message.get("type") == "PermissionDenied":
+        raise PermissionDenied(message.get("permission", "notify"))
+    raise PluginError(detail, speech=message.get("speech") or detail)
+
+
 class _PluginContext:
     """Контекст диалога плюс `state`.
 

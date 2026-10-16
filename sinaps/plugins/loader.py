@@ -43,7 +43,7 @@ import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from ..core.bus import EventBus, EventType
 from ..skills.base import IntentSpec, Response, Skill, SlotSpec
@@ -238,6 +238,11 @@ class PluginProcess:
         self.folder = folder
         self.manifest = manifest
         self.granted = tuple(granted)
+        #: Куда уходит просьба показать уведомление. Задаётся снаружи:
+        #: загрузчик ничего не знает про окно и трей, а это единственное
+        #: место, где их уместно трогать. `None` — показывать некому, и
+        #: плагин получит отказ, а не тишину.
+        self._notify_handler: Callable[[str, str], None] | None = None
         #: Шина для событий жизненного цикла. Необязательна: загрузчик
         #: используется и в тестах, где события никому не нужны, а
         #: подставлять заглушку в каждый вызов — лишнее.
@@ -467,6 +472,45 @@ class PluginProcess:
             # процесс считался бы занятым и его больше никто не убрал бы.
             self.busy = False
 
+    def _notify_action(self, kwargs: dict[str, Any]) -> bool:
+        """Показать уведомление от плагина.
+
+        Право проверяется здесь, а не в плагине: иначе запрет означал бы
+        «мы не покажем результат», а не «не делай». Для уведомления это
+        особенно заметно — тишина выглядит как «ассистент сломался».
+        """
+        from ..core.errors import PermissionDenied
+        from .protocol import CAP_NOTIFY
+
+        if CAP_NOTIFY not in self.granted:
+            raise PermissionDenied(CAP_NOTIFY, self.manifest.name)
+
+        text = str(kwargs.get("text") or "").strip()
+        if not text:
+            # PluginError, а не ValueError: только он доносит `speech`
+            # обратно до голоса. Пустое уведомление — это «нечего
+            # показать», и человеку лучше услышать объяснение, чем
+            # увидеть окно без заголовка.
+            from ..core.errors import PluginError
+
+            raise PluginError(
+                "уведомление без текста",
+                speech="Плагин не смог показать уведомление: нет текста")
+
+        handler = self._notify_handler
+        if handler is None:
+            log.warning("Плагин %s просит уведомление, а показывать некому",
+                        self.manifest.name)
+            return False
+
+        try:
+            handler(str(kwargs.get("title") or "Sinaps"), text)
+        except Exception:                             # noqa: BLE001
+            log.exception("Плагин %s: уведомление не показано",
+                          self.manifest.name)
+            return False
+        return True
+
     async def _serve_capability(self, message: dict[str, Any]) -> None:
         """Выполнить просьбу плагина и ответить.
 
@@ -476,19 +520,24 @@ class PluginProcess:
         """
         assert self._proc is not None
         from ..core.errors import PermissionDenied
-        from .protocol import CAP_STATE, OP_CAP_FAIL, OP_CAP_OK
+        from .protocol import CAP_NOTIFY, CAP_STATE, OP_CAP_FAIL, OP_CAP_OK
         from .protocol import write_message_async
 
         try:
             cap = message.get("cap")
-            if cap != CAP_STATE:
+            if cap == CAP_NOTIFY:
+                reply = {"op": OP_CAP_OK,
+                         "value": self._notify_action(message.get("kwargs")
+                                                      or {})}
+            elif cap == CAP_STATE:
+                if CAP_STATE not in self.granted:
+                    raise PermissionDenied(CAP_STATE, self.manifest.name)
+                reply = {"op": OP_CAP_OK,
+                         "value": _state_action(self._state,
+                                                message.get("action") or "",
+                                                message.get("kwargs") or {})}
+            else:
                 raise PermissionDenied(str(cap or "неизвестное"))
-            if CAP_STATE not in self.granted:
-                raise PermissionDenied(CAP_STATE, self.manifest.name)
-            reply = {"op": OP_CAP_OK,
-                     "value": _state_action(self._state,
-                                            message.get("action") or "",
-                                            message.get("kwargs") or {})}
         except PermissionDenied as exc:
             reply = {"op": OP_CAP_FAIL, "type": "PermissionDenied",
                      "permission": exc.permission, "message": str(exc),
