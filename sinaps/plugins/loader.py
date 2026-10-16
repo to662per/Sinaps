@@ -713,8 +713,14 @@ def _build_specs(process: PluginProcess, ready: dict[str, Any],
 async def load_plugin(folder: str | Path, registry: SkillRegistry,
                       taken_names: set[str] | None = None,
                       *, grantor=None,
-                      bus: "EventBus | None" = None) -> LoadedPlugin:
+                      bus: "EventBus | None" = None,
+                      notify_handler: Callable[[str, str], None] | None = None
+                      ) -> LoadedPlugin:
     """Загрузить один плагин.
+
+    `notify_handler` — куда уходят просьбы показать уведомление (право
+    `notify`). Задаётся снаружи: загрузчик ничего не знает про окно и
+    трей, а это единственное место, где их уместно трогать.
 
     Бросает `ManifestError` при любой проблеме — вызывающий решает, что
     с ней делать. Само исключение не должно вылететь в конвейер.
@@ -741,6 +747,7 @@ async def load_plugin(folder: str | Path, registry: SkillRegistry,
     timeout = max(1, min(timeout, MAX_TIMEOUT_S))
 
     process = PluginProcess(path, manifest, granted, bus=bus)
+    process._notify_handler = notify_handler
     ready = await process.start()
 
     specs = _build_specs(process, ready, manifest.name, timeout,
@@ -824,7 +831,9 @@ def replace_plugin(report: LoadReport, old: LoadedPlugin,
 
 
 async def load_all(plugins_dir: str | Path, registry: SkillRegistry,
-                   bus: "EventBus | None" = None) -> LoadReport:
+                   bus: "EventBus | None" = None,
+                   notify_handler: Callable[[str, str], None] | None = None
+                   ) -> LoadReport:
     """Загрузить все плагины из папки.
 
     Ни одно исключение отсюда не выходит: неудачный плагин — это запись
@@ -840,7 +849,8 @@ async def load_all(plugins_dir: str | Path, registry: SkillRegistry,
     for folder in discover(plugins_dir):
         try:
             report.loaded.append(
-                await load_plugin(folder, registry, taken, bus=bus))
+                await load_plugin(folder, registry, taken, bus=bus,
+                                  notify_handler=notify_handler))
         except ManifestError as exc:
             report.failed.append((folder.name, str(exc)))
             log.error("Плагин %s не загружен: %s", folder.name, exc)

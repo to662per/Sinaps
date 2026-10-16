@@ -701,6 +701,7 @@ async def build_skills_runtime(
     audio_file: str | None = None,
     require_activation: bool | None = None,
     user_name: str = "Капитан",
+    notify_handler: Callable[[str, str], None] | None = None,
 ) -> Runtime:
     """Собирает ассистента с пониманием команд (этап 2+).
 
@@ -732,7 +733,8 @@ async def build_skills_runtime(
     # --- загрузка плагинов ---
     # Файл runtime.py лежит в sinaps/, корень проекта — parents[1]
     plugins_dir = Path(__file__).resolve().parents[1] / "plugins"
-    load_report: LoadReport = await load_all(plugins_dir, registry, bus=bus)
+    load_report: LoadReport = await load_all(
+        plugins_dir, registry, bus=bus, notify_handler=notify_handler)
     log.info("Плагины: %s", load_report.summary())
     for folder, reason in load_report.failed:
         log.warning("Плагин %s не загружен: %s", folder, reason)
