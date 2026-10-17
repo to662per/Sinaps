@@ -251,11 +251,14 @@ class _PluginContext:
     не знает.
     """
 
-    __slots__ = ("_ctx", "state")
+    __slots__ = ("_ctx", "state", "notify")
 
-    def __init__(self, ctx, state) -> None:
+    def __init__(self, ctx, state, notify_fn=None) -> None:
         self._ctx = ctx
         self.state = state
+        #: Показать уведомление и сказать вслух. Право `notify`
+        #: проверяется в ядре, здесь только сам вызов.
+        self.notify = notify_fn
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._ctx, name)
@@ -273,7 +276,7 @@ def _make_context(data: dict[str, Any], state=None):
     payload.setdefault("text", "")
     payload.setdefault("history", [])
     ctx = DialogContext(**payload)
-    return ctx if state is None else _PluginContext(ctx, state)
+    return ctx if state is None else _PluginContext(ctx, state, notify)
 
 
 def _make_response(data: dict[str, Any]):

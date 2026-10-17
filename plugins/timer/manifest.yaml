@@ -1,0 +1,7 @@
+name: timer
+version: 1.0.0
+description: Таймер и напоминание «через N минут»
+entry: plugin:register
+permissions:
+  - notify
+  - state
