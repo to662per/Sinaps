@@ -243,6 +243,10 @@ class PluginProcess:
         #: место, где их уместно трогать. `None` — показывать некому, и
         #: плагин получит отказ, а не тишину.
         self._notify_handler: Callable[[str, str], None] | None = None
+        #: Расписание ядра (`core/scheduler`). `None` — расписание не
+        #: запущено, и плагин получит отказ, а не срок, который не
+        #: сработает.
+        self._scheduler: Any = None
         #: Шина для событий жизненного цикла. Необязательна: загрузчик
         #: используется и в тестах, где события никому не нужны, а
         #: подставлять заглушку в каждый вызов — лишнее.
@@ -472,6 +476,82 @@ class PluginProcess:
             # процесс считался бы занятым и его больше никто не убрал бы.
             self.busy = False
 
+    def _schedule_action(self, action: str, kwargs: dict[str, Any]) -> Any:
+        """Поставить или снять срок. Право — `schedule`.
+
+        Сроки живут в `core/scheduler.py`: там они переживают перезапуск
+        и там же решено, что делать с просроченным. Здесь — только
+        проверка права и передача.
+        """
+        from ..core.errors import PermissionDenied
+        from .protocol import CAP_SCHEDULE as _CAP
+
+        if _CAP not in self.granted:
+            raise PermissionDenied(_CAP, self.manifest.name)
+
+        scheduler = self._scheduler
+        if scheduler is None:
+            # Молча ставить нельзя: плагин решит, что срок есть, и
+            # будет ждать звонка, которого не будет.
+            from ..core.errors import PluginError
+
+            raise PluginError("расписание не запущено",
+                              speech="Ассистент сейчас не может поставить "
+                                     "напоминание.")
+
+        plan_id = str(kwargs.get("plan_id") or "").strip()
+        if not plan_id:
+            from ..core.errors import PluginError
+
+            raise PluginError("у срока нет имени",
+                              speech="Напоминание без названия не поставить.")
+
+        if action == "at":
+            delay = float(kwargs.get("delay_s") or 0)
+            plan = scheduler.schedule_nowait(plan_id, self.manifest.name,
+                                             delay, kwargs.get("payload") or {})
+            return plan.due_at
+
+        if action == "cancel":
+            return bool(scheduler.cancel(plan_id))
+
+        if action == "pending":
+            return [p.id for p in scheduler.store.pending(self.manifest.name)]
+
+        from ..core.errors import PluginError
+
+        raise PluginError(f"расписание не умеет «{action}»")
+
+    async def fire_plan(self, plan) -> bool:
+        """Позвать плагина в срок. `False` — не дождались ответа.
+
+        Запись всё равно считается отработавшей: иначе после
+        перезапуска она ударит повторно в тот же плагин, который уже
+        не отвечает.
+        """
+        if self._proc is None or self._proc.returncode is not None:
+            log.info("Срок %s: плагин %s не запущен",
+                     plan.id, self.manifest.name)
+            return False
+
+        from .protocol import (OP_FIRE, OP_FIRE_FAIL, OP_FIRE_OK,
+                               ProtocolError, write_message_async)
+
+        try:
+            await write_message_async(self._proc.stdin, {
+                "op": OP_FIRE, "plan_id": plan.id, "plugin": self.manifest.name,
+                "payload": plan.payload})
+            reply = await read_message_async(self._proc.stdout)
+        except (ProtocolError, Exception):             # noqa: BLE001
+            log.exception("Срок %s: не удалось позвать плагин", plan.id)
+            return False
+
+        if reply.get("op") == OP_FIRE_OK:
+            return True
+        log.info("Срок %s: плагин не принял звонок (%s)", plan.id,
+                 reply.get("op") or OP_FIRE_FAIL)
+        return False
+
     def _notify_action(self, kwargs: dict[str, Any]) -> bool:
         """Показать уведомление от плагина.
 
@@ -520,12 +600,19 @@ class PluginProcess:
         """
         assert self._proc is not None
         from ..core.errors import PermissionDenied
-        from .protocol import CAP_NOTIFY, CAP_STATE, OP_CAP_FAIL, OP_CAP_OK
+        from .protocol import (CAP_NOTIFY, CAP_SCHEDULE, CAP_STATE, OP_CAP_FAIL,
+                               OP_CAP_OK)
         from .protocol import write_message_async
 
         try:
             cap = message.get("cap")
-            if cap == CAP_NOTIFY:
+            if cap == CAP_SCHEDULE:
+                reply = {"op": OP_CAP_OK,
+                         "value": self._schedule_action(message.get("action")
+                                                       or "",
+                                                       message.get("kwargs")
+                                                       or {})}
+            elif cap == CAP_NOTIFY:
                 reply = {"op": OP_CAP_OK,
                          "value": self._notify_action(message.get("kwargs")
                                                       or {})}

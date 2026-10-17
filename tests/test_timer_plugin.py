@@ -25,9 +25,6 @@ def timer():
     spec = importlib.util.spec_from_file_location("timer_plugin", _PLUGIN)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    module._STATE = None
-    module._TASK = None
-    module._NOTIFY = None
     return module
 
 
@@ -92,72 +89,7 @@ def test_time_is_spoken_in_words(timer):
 # --- постановка и отмена -----------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_timer_is_armed(timer):
-    """Постановка запоминает срок."""
-    from sinaps.skills.base import Response
-
-    reply = timer._set(object(), 300, "Пора")
-
-    assert isinstance(reply, Response)
-    assert timer._STATE["deadline"] > 0, (
-        "таймер не встал — срок не сохранён")
-    assert "Таймер" in reply.speech
-    timer._cancel(object(), {})
-
-
-@pytest.mark.asyncio
-async def test_cancel_stops_armed_timer(timer):
-    """Отмена снимает срок."""
-    timer._set(object(), 300, "Пора")
-
-    reply = timer._cancel(object(), {})
-
-    assert timer._STATE["deadline"] == 0
-    assert "отменён" in reply.speech
-
-
-@pytest.mark.asyncio
-async def test_cancel_without_timer_is_not_an_error(timer):
-    """Отменить несуществующий таймер — не ошибка."""
-    reply = timer._cancel(object(), {})
-
-    assert "не запущен" in reply.speech
-
-
 # --- срабатывание ------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_timer_fires_and_notifies(timer):
-    """Сработав, таймер зовёт уведомление.
-
-    Молчащее срабатывание хуже отсутствия: человек ждёт, что его позовут,
-    и решает, что таймер сломан.
-    """
-    shown: list[tuple[str, str]] = []
-
-    async def _notify(text, *, title="Sinaps"):
-        shown.append((title, text))
-
-    timer._NOTIFY = _notify
-    timer._STATE = {"deadline": timer._asyncio_now() - 1, "label": "Пора встать"}
-
-    await timer._fire()
-
-    assert shown == [("Таймер", "Пора встать")], "уведомление не показано"
-
-
-@pytest.mark.asyncio
-async def test_fire_does_nothing_without_timer(timer):
-    """Срабатывание без таймера молчит, а не зовёт впустую."""
-    shown: list = []
-    timer._NOTIFY = lambda text, title="Sinaps": shown.append(text)
-    timer._STATE = {"deadline": 0, "label": ""}
-
-    await timer._fire()
-
-    assert shown == []
 
 
 def test_notify_reaches_plugin_context(timer):

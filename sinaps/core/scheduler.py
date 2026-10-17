@@ -202,6 +202,21 @@ class Scheduler:
         self._arm(plan)
         return plan
 
+    def schedule_nowait(self, plan_id: str, plugin: str, delay_s: float,
+                        payload: dict | None = None) -> Plan:
+        """Поставить срок из кода, который не ждёт (протокол плагина).
+
+        Отдельный метод, а не `schedule`, потому что там `async`: вызов из
+        обработки протокола уже идёт внутри работающего цикла, и ждать
+        нечего. Если планировщик не запущен, срок всё равно ложится в
+        базу — его поднимет следующий старт, — но об этом честно
+        пишется в журнал.
+        """
+        plan = self.store.add(plan_id, plugin, time.time() + max(0.0, delay_s),
+                              payload)
+        self._arm(plan)
+        return plan
+
     def schedule_at(self, plan_id: str, plugin: str, due_at: float,
                     payload: dict | None = None) -> Plan:
         """Поставить срок на конкретный момент."""

@@ -207,6 +207,54 @@ class _StateProxy:
         return int(self._ask("clear") or 0)
 
 
+def _schedule(action: str, **kwargs) -> Any:
+    """Запрос к расписанию ядра: поставить срок, снять, перечислить."""
+    import sys
+
+    from .protocol import (CAP_SCHEDULE, OP_CAP, OP_CAP_FAIL, OP_CAP_OK,
+                           ProtocolError, read_message, write_message)
+
+    try:
+        write_message(sys.stdout.buffer, {
+            "op": OP_CAP, "cap": CAP_SCHEDULE, "action": action,
+            "kwargs": kwargs})
+    except ProtocolError as exc:
+        raise PluginError(
+            f"Напоминание: значение нельзя передать — {exc}",
+            speech="Не смог поставить напоминание") from exc
+
+    message = read_message(sys.stdin.buffer)
+    if message.get("op") == OP_CAP_OK:
+        return message.get("value")
+    detail = message.get("message") or "расписание недоступно"
+    if message.get("type") == "PermissionDenied":
+        raise PermissionDenied(message.get("permission", "schedule"))
+    raise PluginError(detail, speech=message.get("speech") or detail)
+
+
+async def schedule(plan_id: str, delay_s: float,
+                   payload: dict | None = None) -> float:
+    """Поставить напоминание через `delay_s` секунд.
+
+    Срок хранит ядро, поэтому переживает перезапуск ассистента.
+    Повтор с тем же `plan_id` переписывает срок, а не плодит записи.
+
+    Возвращает момент срабатывания; подробности — `describe`.
+    """
+    return _schedule("at", plan_id=plan_id, delay_s=float(delay_s),
+                     payload=payload or {})
+
+
+async def cancel(plan_id: str) -> bool:
+    """Снять напоминание. `False` — такого не было."""
+    return bool(_schedule("cancel", plan_id=plan_id))
+
+
+async def pending() -> list[str]:
+    """Имена напоминаний, которые ещё не сработали."""
+    return list(_schedule("pending") or [])
+
+
 async def notify(text: str, *, title: str = "Sinaps") -> None:
     """Показать уведомление и сказать вслух.
 
@@ -251,7 +299,7 @@ class _PluginContext:
     не знает.
     """
 
-    __slots__ = ("_ctx", "state", "notify")
+    __slots__ = ("_ctx", "state", "notify", "schedule", "cancel", "pending")
 
     def __init__(self, ctx, state, notify_fn=None) -> None:
         self._ctx = ctx
@@ -259,6 +307,11 @@ class _PluginContext:
         #: Показать уведомление и сказать вслух. Право `notify`
         #: проверяется в ядре, здесь только сам вызов.
         self.notify = notify_fn
+        #: Отложенное дело, переживающее перезапуск. Право `schedule`
+        #: проверяется в ядре; здесь — сам вызов.
+        self.schedule = schedule
+        self.cancel = cancel
+        self.pending = pending
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._ctx, name)
