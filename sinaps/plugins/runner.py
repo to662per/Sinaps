@@ -48,6 +48,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 log = logging.getLogger("sinaps.plugins.runner")
 
 #: Поля контекста, которые переносятся через границу.
+#: Контекст, отданный плагину. Держится, потому что `on_fire`
+#: приходит без контекста: у него нет ни запроса, ни слотов, а заговорить
+#: он должен. Без этого таймер сработал бы молча.
+_CONTEXT: "_PluginContext | None" = None
+
 CTX_FIELDS = ("text", "source", "confidence", "history", "user_name",
               "pending_intent")
 
@@ -71,6 +76,10 @@ def _describe_error(exc: BaseException) -> dict[str, Any]:
         "message": str(exc),
         "speech": speech if isinstance(speech, str) else str(exc),
     }
+
+
+#: Модуль последнего загруженного плагина. Нужен для `on_fire`.
+_ENTRY_MODULE: list = []
 
 
 def _load_entry(folder: Path, module_name: str, function_name: str):
@@ -99,6 +108,10 @@ def _load_entry(folder: Path, module_name: str, function_name: str):
             f"{folder}: в модуле «{module_name}» нет функции "
             f"«{function_name}», хотя она указана в entry"
         )
+    #: Модуль нужен для `on_fire`: обработчик звонка лежит в модуле, а
+    #: не в том, что вернул `register`. Хранится здесь, потому что
+    #: `_load_entry` возвращает только функцию.
+    _ENTRY_MODULE.append(module)
     return getattr(module, function_name)
 
 
@@ -352,7 +365,8 @@ def _reply_error(request_id: int, exc: BaseException) -> None:
 
 
 def main() -> int:
-    from .protocol import OP_CALL, OP_FAILED, OP_HELLO, OP_READY, OP_STOP
+    from .protocol import (OP_CALL, OP_FAILED, OP_FIRE, OP_HELLO, OP_READY,
+                           OP_STOP)
     from .protocol import OP_RESULT, ProtocolError, read_message
     # Импорт `ManifestError` один и в начале: если импортировать его
     # внутри ветки, имя становится локальным для всей функции, и в другой
@@ -420,6 +434,17 @@ def main() -> int:
             raise ManifestError(
                 f"{folder}: {hello['entry']} — это не функция")
 
+        # Контекст создаётся один раз, до `register`, и кладётся в
+        # реестр. Так плагин достаёт его и при регистрации, и потом в
+        # `on_fire`, который приходит уже без контекста: у звонка нет ни
+        # запроса, ни слотов, а показать окно и заговорить он должен.
+        # Создавать контекст заново на каждый звонок нельзя — у нового
+        # могут быть другие права, и уведомление ушло бы в никуда.
+        global _CONTEXT
+
+        _CONTEXT = _make_context({}, state=_StateProxy())
+        registry.context = _CONTEXT
+
         result = entry(registry)
 
         if result is not None and not isinstance(result, (Skill, list, tuple)):
@@ -459,6 +484,10 @@ def main() -> int:
         op = message.get("op")
         if op == OP_STOP:
             return 0
+
+        if op == OP_FIRE:
+            _handle_fire(message, module)
+            continue
 
         if op != OP_CALL:
             _write({"op": OP_FAILED, "phase": "run",
@@ -516,3 +545,46 @@ def _as_dict(response) -> dict[str, Any]:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+def _handle_fire(message, module) -> None:
+    """Позвать ``on_fire`` плагина.
+
+    Ядро будит плагина в срок. Звонок приходит без контекста: у него
+    нет ни запроса, ни слотов, а заговорить он должен. Контекст берётся
+    из того, что ``register`` сохранил при загрузке.
+
+    Ошибка не роняет плагин: упавший ``on_fire`` потерял бы и
+    остальные сроки. Но ядро должно узнать, что звонок не принят, —
+    отвечаем ``fire_fail``, и запись считается отработавшей, чтобы не
+    ударить повторно.
+    """
+    from .protocol import OP_FIRE_FAIL, OP_FIRE_OK
+
+    plan_id = message.get("plan_id") or "?"
+    payload = message.get("payload") or {}
+
+    handler = getattr(module, "on_fire", None)
+    if handler is None:
+        log.warning("Плагин не объявил on_fire — срок %s не обработан",
+                    plan_id)
+        _write({"op": OP_FIRE_FAIL, "plan_id": plan_id,
+                "type": "AttributeError",
+                "message": "плагин не объявил on_fire"})
+        return
+
+    try:
+        if _CONTEXT is None:
+            # Молча отметить успехом нельзя: плагин решит, что
+            # отработал, а человек не услышит ничего.
+            raise RuntimeError("контекст плагина не сохранён при регистрации")
+
+        result = handler(payload)
+        if asyncio.iscoroutine(result):
+            asyncio.run(result)
+        _write({"op": OP_FIRE_OK, "plan_id": plan_id})
+    except Exception as exc:                          # noqa: BLE001
+        log.debug("Плагин упал на сроке %s:\n%s", plan_id,
+                  traceback.format_exc())
+        _write({"op": OP_FIRE_FAIL, "plan_id": plan_id,
+                "type": type(exc).__name__, "message": str(exc)})

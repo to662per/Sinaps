@@ -209,6 +209,10 @@ async def test_plan_survives_restart(tmp_path):
     await asyncio_sleep(0.2)
     assert seen == [{"why": "второй"}], "после перезапуска не сработало"
 
+    # Планировщик останавливается явно: незакрытая задача уезжает в
+    # следующий тест и там подвешивает цикл, а виноват окажется не тот.
+    await second.stop()
+
 
 @pytest.mark.asyncio
 async def test_overdue_plan_fires_right_after_restart(tmp_path):
