@@ -108,7 +108,7 @@ def test_broken_payload_does_not_break_reading(store):
 async def test_plan_fires_after_delay(store):
     """Срок срабатывает и зовёт плагин."""
     seen: list[dict] = []
-    sched = Scheduler(store, {"timer": lambda p: _collect(seen, p)})
+    sched = Scheduler(store, {"timer": lambda plan: _collect(seen, plan)})
 
     await sched.schedule("t1", "timer", 0.05, {"why": "чай"})
     await asyncio_sleep(0.2)
@@ -166,7 +166,7 @@ async def test_cancelled_plan_does_not_fire(store):
     человек уверит его, что тот сработает.
     """
     seen: list[dict] = []
-    sched = Scheduler(store, {"timer": lambda p: _collect(seen, p)})
+    sched = Scheduler(store, {"timer": lambda plan: _collect(seen, plan)})
     sched.start()
 
     await sched.schedule("t1", "timer", 0.05, {"why": "чай"})
@@ -190,7 +190,7 @@ async def test_plan_survives_restart(tmp_path):
     seen: list[dict] = []
 
     first = Scheduler(PlanStore(tmp_path / "plans.db"),
-                      {"timer": lambda p: _collect(seen, p)})
+                      {"timer": lambda plan: _collect(seen, plan)})
     first.start()
     await first.schedule("t1", "timer", 0.05, {"why": "чай"})
     await asyncio_sleep(0.15)
@@ -202,7 +202,7 @@ async def test_plan_survives_restart(tmp_path):
 
     seen.clear()
     second = Scheduler(PlanStore(tmp_path / "plans.db"),
-                       {"timer": lambda p: _collect(seen, p)})
+                       {"timer": lambda plan: _collect(seen, plan)})
     second.start()
     assert "t2" in second.pending_ids(), "срок не пережил перезапуск"
 
@@ -227,7 +227,7 @@ async def test_overdue_plan_fires_right_after_restart(tmp_path):
     store.add("old", "timer", time.time() - 3600, {"why": "вчера"})
 
     seen: list[dict] = []
-    sched = Scheduler(PlanStore(path), {"timer": lambda p: _collect(seen, p)})
+    sched = Scheduler(PlanStore(path), {"timer": lambda plan: _collect(seen, plan)})
     sched.start()
     restored = sched.restore()
 
@@ -251,8 +251,8 @@ async def test_stop_keeps_plans_for_next_start(store):
 # --- помощники ---------------------------------------------------------------
 
 
-async def _collect(sink: list, payload: dict) -> None:
-    sink.append(payload)
+async def _collect(sink: list, plan) -> None:
+    sink.append(plan.payload)
 
 
 async def _noop() -> None:

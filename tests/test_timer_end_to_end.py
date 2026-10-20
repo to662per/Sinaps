@@ -98,8 +98,8 @@ async def test_scheduler_receives_a_plan_and_fires_it(tmp_path):
 
     seen: list[dict] = []
 
-    async def _fire(payload):
-        seen.append(payload)
+    async def _fire(plan):
+        seen.append(plan.payload)
 
     sched = Scheduler(PlanStore(tmp_path / "plans.db"), {"timer": _fire})
     sched.start(asyncio.get_running_loop())
@@ -127,8 +127,8 @@ async def test_plan_survives_assistant_restart(tmp_path):
 
     seen: list[dict] = []
 
-    async def _fire(payload):
-        seen.append(payload)
+    async def _fire(plan):
+        seen.append(plan.payload)
 
     second = Scheduler(PlanStore(path), {"timer": _fire})
     second.start(asyncio.get_running_loop())

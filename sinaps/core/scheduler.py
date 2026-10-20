@@ -52,7 +52,9 @@ CREATE INDEX IF NOT EXISTS plans_pending ON plans (fired_at, due_at);
 """
 
 #: Плагин, которому нужно позвать. Ключ — имя плагина, значение —
-#: функция, ждущая `payload`.
+#: функция, ждущая `Plan`. Отдаётся план целиком, а не только
+#: полезная нагрузка: обработчику нужен и id, иначе он не сможет
+#: отличить один звонок от другого.
 Fires = dict[str, Callable[[dict], Awaitable[None]]]
 
 
@@ -292,7 +294,7 @@ class Scheduler:
             return False
 
         try:
-            await callback(plan.payload)
+            await callback(plan)
         except asyncio.CancelledError:
             raise
         except Exception:                             # noqa: BLE001

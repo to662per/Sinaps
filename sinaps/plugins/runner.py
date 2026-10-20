@@ -224,6 +224,10 @@ def _schedule(action: str, **kwargs) -> Any:
     """Запрос к расписанию ядра: поставить срок, снять, перечислить."""
     import sys
 
+    # `PermissionDenied` нужен внятным: при отказе по праву плагин
+    # должен получить отказ, а не NameError. Раньше имя не было
+    # импортировано, и отказ выглядел как поломка самого плагина.
+    from ..core.errors import PermissionDenied, PluginError
     from .protocol import (CAP_SCHEDULE, OP_CAP, OP_CAP_FAIL, OP_CAP_OK,
                            ProtocolError, read_message, write_message)
 
@@ -486,7 +490,7 @@ def main() -> int:
             return 0
 
         if op == OP_FIRE:
-            _handle_fire(message, module)
+            _handle_fire(message, _ENTRY_MODULE[-1] if _ENTRY_MODULE else None)
             continue
 
         if op != OP_CALL:
@@ -543,10 +547,6 @@ def _as_dict(response) -> dict[str, Any]:
     return data
 
 
-if __name__ == "__main__":
-    sys.exit(main())
-
-
 def _handle_fire(message, module) -> None:
     """Позвать ``on_fire`` плагина.
 
@@ -581,10 +581,22 @@ def _handle_fire(message, module) -> None:
 
         result = handler(payload)
         if asyncio.iscoroutine(result):
-            asyncio.run(result)
-        _write({"op": OP_FIRE_OK, "plan_id": plan_id})
+            result = asyncio.run(result)
+
+        # Плагин возвращает, что сказать. Показывает ядро: изнутри
+        # обработчика ходить в ядро нельзя, цикл занят.
+        said = result if isinstance(result, dict) else {}
+        _write({"op": OP_FIRE_OK, "plan_id": plan_id,
+                "text": str(said.get("text") or ""),
+                "title": str(said.get("title") or "Sinaps")})
     except Exception as exc:                          # noqa: BLE001
         log.debug("Плагин упал на сроке %s:\n%s", plan_id,
                   traceback.format_exc())
         _write({"op": OP_FIRE_FAIL, "plan_id": plan_id,
                 "type": type(exc).__name__, "message": str(exc)})
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+
+

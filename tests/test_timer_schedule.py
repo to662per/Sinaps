@@ -133,8 +133,8 @@ async def test_timer_survives_assistant_restart(tmp_path):
 
     seen: list[dict] = []
 
-    async def _fire(payload):
-        seen.append(payload)
+    async def _fire(plan):
+        seen.append(plan.payload)
 
     # Второй запуск: новое хранилище, новый планировщик.
     second = Scheduler(PlanStore(path), {"timer": _fire})

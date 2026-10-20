@@ -112,6 +112,12 @@ async def _start(ctx, slots) -> Response:
     return Response(speech=f"Таймер на {_human(seconds)}")
 
 
+async def _on_fire(ctx, slots) -> Response:
+    """Обработчик звонка ядра. Текст приходит в слотах."""
+    why = (slots or {}).get("why") or "Время вышло"
+    return Response(speech=why)
+
+
 async def _cancel(ctx, slots) -> Response:
     """Снять таймер. Отсутствие — не ошибка."""
     removed = await ctx.cancel(PLAN_ID)
@@ -120,16 +126,18 @@ async def _cancel(ctx, slots) -> Response:
     return Response(speech="Таймер отменён")
 
 
-async def on_fire(payload) -> None:
+async def on_fire(payload) -> Response:
     """Ядро разбудило плагин в срок.
 
-    Здесь плагин показывает окно и говорит вслух: права `notify`.
+    Возвращает, что сказать, — показывает ядро. Изнутри обработчика
+    ходить в ядро нельзя: главный цикл плагина занят этим обработчиком
+    и не читает ввод, а обращение к возможности ждёт ответа именно оттуда.
+    Плагин зависал намертво, и человек не слышал звонка.
+
     Обработчик не должен падать — упав, он потеряет и остальные сроки.
     """
     why = (payload or {}).get("why") or "Время вышло"
-    ctx = _current_context()
-    if ctx is not None and getattr(ctx, "notify", None) is not None:
-        await ctx.notify(why, title="Таймер")
+    return Response(speech=why, title="Таймер")
 
 
 _CONTEXT = None
@@ -155,6 +163,15 @@ def register(registry) -> None:
                                   description="Сколько ждать: «пять минут», «10 минут»")},
         examples=["поставь таймер на пять минут", "напомни через 10 минут"],
         description="Поставить таймер. Ассистент скажет вслух, когда время.")
+
+    # Команда, которой человек не может сказать: её зовёт ядро, когда
+    # срок настал. Отдельный кадр протокола тут был бы вторым
+    # читателем ввода, а читатель один.
+    skill.command(
+        "on_fire", _on_fire,
+        patterns=[r"(?!)"],
+        examples=[],
+        description="Внутренняя команда: ядро зовёт плагин в срок.")
 
     skill.command(
         "cancel", _cancel,

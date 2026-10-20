@@ -525,32 +525,41 @@ class PluginProcess:
     async def fire_plan(self, plan) -> bool:
         """Позвать плагина в срок. `False` — не дождались ответа.
 
-        Запись всё равно считается отработавшей: иначе после
-        перезапуска она ударит повторно в тот же плагин, который уже
-        не отвечает.
+        Звонок идёт обычной командой, а не отдельным кадром протокола.
+        Отдельный кадр означал бы второго читателя stdout, а читатель
+        тут один: `call()` крутит цикл и сам разбирает промежуточные
+        кадры. Два читателя делили бы сообщения, и плагин получал бы
+        «ответ не на тот вызов» — а человек не услышал бы звонка.
+
+        Плагин отвечает тем, что сказать. Показывает ядро: изнутри
+        обработчика ходить в ядро нельзя, цикл занят этим обработчиком.
         """
         if self._proc is None or self._proc.returncode is not None:
             log.info("Срок %s: плагин %s не запущен",
                      plan.id, self.manifest.name)
             return False
 
-        from .protocol import (OP_FIRE, OP_FIRE_FAIL, OP_FIRE_OK,
-                               ProtocolError, write_message_async)
-
+        command = f"{self.manifest.name}.on_fire"
         try:
-            await write_message_async(self._proc.stdin, {
-                "op": OP_FIRE, "plan_id": plan.id, "plugin": self.manifest.name,
-                "payload": plan.payload})
-            reply = await read_message_async(self._proc.stdout)
-        except (ProtocolError, Exception):             # noqa: BLE001
+            # Полезная нагрузка идёт в слоты: так её ждёт обычный
+            # обработчик команды, и плагину не нужно знать
+            # ничего особенного про звонок.
+            response = await self.call(command, {}, plan.payload or {})
+        except Exception:                             # noqa: BLE001
             log.exception("Срок %s: не удалось позвать плагин", plan.id)
             return False
 
-        if reply.get("op") == OP_FIRE_OK:
-            return True
-        log.info("Срок %s: плагин не принял звонок (%s)", plan.id,
-                 reply.get("op") or OP_FIRE_FAIL)
-        return False
+        # `call()` отдаёт объект Response, а не словарь. Раньше здесь
+        # ждали словарь, и уведомление не показывалось: текст молча
+        # терялся, и человек слышал тишину.
+        said = str(getattr(response, "speech", "") or "").strip()
+        if isinstance(response, dict):
+            said = str(response.get("speech") or "").strip()
+        if said and self._notify_handler is not None:
+            # Заголовок — имя плагина: у ответа навыка своего заголовка
+            # нет, а «Sinaps» на все плагины не годится.
+            self._notify_handler(self.manifest.name, said)
+        return True
 
     def _notify_action(self, kwargs: dict[str, Any]) -> bool:
         """Показать уведомление от плагина.
