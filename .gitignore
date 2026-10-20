@@ -37,6 +37,7 @@ plugins/*
 # внутрь исключённого каталога и не увидит файлы даже с явным плюсом.
 !plugins/weather/
 !plugins/timer/
+!plugins/reminder/
 
 # OS
 .DS_Store
