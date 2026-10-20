@@ -93,13 +93,41 @@ def _seconds(text: str) -> int | None:
     return seconds
 
 
+def _plural(count: int, one: str, few: str, many: str) -> str:
+    """Правильная форма числительного: 1 минута, 3 минуты, 5 минут.
+
+    Ассистент говорит вслух, и «осталось 3 минуты» звучит как ошибка.
+    """
+    tail = abs(count) % 100
+    if 11 <= tail <= 14:
+        return many
+    tail %= 10
+    if tail == 1:
+        return one
+    if 2 <= tail <= 4:
+        return few
+    return many
+
+
 def _human(seconds: int) -> str:
-    """Сколько осталось — словами, а не цифрами."""
-    if seconds % 3600 == 0:
-        return f"{seconds // 3600} часов"
-    if seconds % 60 == 0:
-        return f"{seconds // 60} минут"
-    return f"{seconds} секунд"
+    """Сколько осталось — словами и с правильными формами.
+
+    Голосом это читается вслух, поэтому «1 минут 30 секунд» — это
+    ошибка, которую слышно. Часы, минуты и секунды собираются вместе:
+    «час двадцать минут» короче и понятнее, чем «4800 секунд».
+    """
+    seconds = max(0, int(seconds))
+    hours, rest = divmod(seconds, 3600)
+    minutes, secs = divmod(rest, 60)
+
+    parts: list[str] = []
+    if hours:
+        parts.append(f"{hours} {_plural(hours, 'час', 'часа', 'часов')}")
+    if minutes:
+        parts.append(f"{minutes} {_plural(minutes, 'минута', 'минуты', 'минут')}")
+    if secs or not parts:
+        parts.append(f"{secs} {_plural(secs, 'секунда', 'секунды', 'секунд')}")
+    return " ".join(parts)
 
 
 async def _start(ctx, slots) -> Response:
@@ -110,6 +138,27 @@ async def _start(ctx, slots) -> Response:
                                 "таймер на пять минут»."))
     await ctx.schedule(PLAN_ID, seconds, {"why": "Пора"})
     return Response(speech=f"Таймер на {_human(seconds)}")
+
+
+async def _left(ctx, slots) -> Response:
+    """Сколько осталось до звонка.
+
+    Человек спрашивает, чтобы понять, стоит ли ждать. Ответ «таймер не
+    запущен» и ответ «осталось три минуты» — разные вещи, и молчать
+    вместо ответа нельзя: человек решит, что его не расслышали.
+    """
+    try:
+        left = await ctx.pending()
+    except Exception:                              # noqa: BLE001
+        left = {}
+
+    if not isinstance(left, dict) or PLAN_ID not in left:
+        return Response(speech="Таймер не запущен")
+
+    seconds = max(0, int(left[PLAN_ID]))
+    if seconds <= 0:
+        return Response(speech="Таймер вот-вот сработает")
+    return Response(speech=f"Осталось {_human(seconds)}")
 
 
 async def _on_fire(ctx, slots) -> Response:
@@ -158,11 +207,23 @@ def register(registry) -> None:
     skill.command(
         "set", _start,
         patterns=[r"^(?:поставь|запусти|включи)\s+таймер\s*(?:на)?\s*(?P<amount>.+)$",
+                  r"^(?:поставь|запусти|включи)\s+звонок\s*(?:на)?\s*(?P<amount>.+)$",
+                  r"^звонок\s+(?:через\s+)?(?P<amount>.+)$",
                   r"^напомни\s+(?:через\s+)?(?P<amount>.+)$"],
         slots={"amount": SlotSpec(name="amount", type="string", required=True,
                                   description="Сколько ждать: «пять минут», «10 минут»")},
-        examples=["поставь таймер на пять минут", "напомни через 10 минут"],
+        examples=["поставь таймер на пять минут", "поставь звонок на 10 минут",
+                  "напомни через 10 минут"],
         description="Поставить таймер. Ассистент скажет вслух, когда время.")
+
+    skill.command(
+        "left", _left,
+        patterns=[r"^сколько\s+осталось\s+(?:таймера|звонка|времени)$",
+                  r"^сколько\s+осталось$",
+                  r"^через\s+сколько\s+(?:таймер|звонок)\s+сработает$",
+                  r"^осталось\s+сколько\s+времени$"],
+        examples=["сколько осталось таймера"],
+        description="Сколько осталось до звонка.")
 
     # Команда, которой человек не может сказать: её зовёт ядро, когда
     # срок настал. Отдельный кадр протокола тут был бы вторым
@@ -175,8 +236,9 @@ def register(registry) -> None:
 
     skill.command(
         "cancel", _cancel,
-        patterns=[r"^отмени\s+таймер$", r"^отмена\s+таймера$"],
-        examples=["отмени таймер"],
+        patterns=[r"^отмени\s+(?:таймер|звонок)$",
+                  r"^отмена\s+(?:таймера|звонка)$"],
+        examples=["отмени таймер", "отмени звонок"],
         description="Отменить запущенный таймер.")
 
     registry.add(skill)

@@ -82,8 +82,9 @@ def test_time_is_spoken_in_words(timer):
     как отчёт о сбое.
     """
     assert timer._human(300) == "5 минут"
-    assert timer._human(3600) == "1 часов"
+    assert timer._human(3600) == "1 час"
     assert timer._human(45) == "45 секунд"
+    assert timer._human(90) == "1 минута 30 секунд"
 
 
 # --- постановка и отмена -----------------------------------------------------

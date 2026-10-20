@@ -38,6 +38,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import logging
 import os
 import sys
@@ -499,24 +500,40 @@ class PluginProcess:
                               speech="Ассистент сейчас не может поставить "
                                      "напоминание.")
 
+        # Имя срока нужно действиям, которые срок меняют. Раньше оно
+        # спрашивалось раньше всех, и «перечислить» — действие без
+        # имени — падало с «у срока нет имени». Человек спрашивал
+        # «сколько осталось», а получал ошибку.
         plan_id = str(kwargs.get("plan_id") or "").strip()
-        if not plan_id:
-            from ..core.errors import PluginError
-
-            raise PluginError("у срока нет имени",
-                              speech="Напоминание без названия не поставить.")
 
         if action == "at":
+            if not plan_id:
+                from ..core.errors import PluginError
+
+                raise PluginError("у срока нет имени",
+                                  speech="Напоминание без названия не поставить.")
             delay = float(kwargs.get("delay_s") or 0)
             plan = scheduler.schedule_nowait(plan_id, self.manifest.name,
                                              delay, kwargs.get("payload") or {})
             return plan.due_at
 
         if action == "cancel":
+            if not plan_id:
+                from ..core.errors import PluginError
+
+                raise PluginError("у срока нет имени",
+                                  speech="Напоминание без названия не снять.")
             return bool(scheduler.cancel(plan_id))
 
         if action == "pending":
-            return [p.id for p in scheduler.store.pending(self.manifest.name)]
+            # Имя срока и сколько секунд осталось. Одних имён мало:
+            # человек спрашивает «сколько осталось», и плагину нужен
+            # ответ с цифрой, а не список названий.
+            # Округление вверх: за 0.9 секунды человек должен услышать
+            # «осталась минута», а не «осталось 0». Обрезка вниз
+            # превращала последнюю минуту в ноль.
+            return {p.id: math.ceil(p.due_in())
+                    for p in scheduler.store.pending(self.manifest.name)}
 
         from ..core.errors import PluginError
 

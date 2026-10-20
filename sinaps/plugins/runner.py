@@ -267,9 +267,16 @@ async def cancel(plan_id: str) -> bool:
     return bool(_schedule("cancel", plan_id=plan_id))
 
 
-async def pending() -> list[str]:
-    """Имена напоминаний, которые ещё не сработали."""
-    return list(_schedule("pending") or [])
+async def pending() -> dict[str, int]:
+    """Что ещё не сработало: имя срока и сколько секунд осталось.
+
+    Словарь, а не список имён: человек спрашивает «сколько осталось»,
+    и плагину нужен ответ с числом.
+    """
+    result = _schedule("pending") or {}
+    if isinstance(result, dict):
+        return {str(k): int(v) for k, v in result.items()}
+    return {str(name): 0 for name in list(result)}
 
 
 async def notify(text: str, *, title: str = "Sinaps") -> None:
