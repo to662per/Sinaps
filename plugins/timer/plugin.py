@@ -141,8 +141,7 @@ def _current_context():
 
 def register(registry) -> None:
     """Объявить навыки таймера и запомнить контекст для звонков."""
-    from sinaps.skills import Skill
-    from sinaps.skills.base import SlotSpec
+    from sinaps.skills.base import Skill, SlotSpec
 
     global _CONTEXT
 

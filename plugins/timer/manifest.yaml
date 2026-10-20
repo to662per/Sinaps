@@ -5,3 +5,4 @@ entry: plugin:register
 permissions:
   - notify
   - state
+  - schedule

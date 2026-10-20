@@ -801,7 +801,8 @@ async def load_plugin(folder: str | Path, registry: SkillRegistry,
                       taken_names: set[str] | None = None,
                       *, grantor=None,
                       bus: "EventBus | None" = None,
-                      notify_handler: Callable[[str, str], None] | None = None
+                      notify_handler: Callable[[str, str], None] | None = None,
+                      scheduler: Any = None,
                       ) -> LoadedPlugin:
     """Загрузить один плагин.
 
@@ -835,7 +836,13 @@ async def load_plugin(folder: str | Path, registry: SkillRegistry,
 
     process = PluginProcess(path, manifest, granted, bus=bus)
     process._notify_handler = notify_handler
+    process._scheduler = scheduler
     ready = await process.start()
+
+    # Звонок в срок адресуется плагину по имени. Планировщик живёт в
+    # ядре и знает только имена, а звать надо конкретный процесс.
+    if scheduler is not None:
+        scheduler.register_fire(manifest.name, process.fire_plan)
 
     specs = _build_specs(process, ready, manifest.name, timeout,
                          set(registry.spec_names()))
@@ -874,7 +881,8 @@ async def load_plugin(folder: str | Path, registry: SkillRegistry,
 async def reload_plugin(plugin: LoadedPlugin, folder: str | Path,
                         registry: SkillRegistry,
                         bus: "EventBus | None" = None,
-                        notify_handler: Callable[[str, str], None] | None = None
+                        notify_handler: Callable[[str, str], None] | None = None,
+                        scheduler: Any = None,
                         ) -> LoadedPlugin:
     """Перезагрузить плагин на ходу, не трогая ассистент.
 
@@ -898,7 +906,7 @@ async def reload_plugin(plugin: LoadedPlugin, folder: str | Path,
     plugin.holder = None
 
     fresh = await load_plugin(folder, registry, bus=bus,
-                          notify_handler=notify_handler)
+                          notify_handler=notify_handler, scheduler=scheduler)
     if not fresh.commands:
         raise ManifestError(f"{folder}: после перезагрузки нет ни одной команды")
 
@@ -922,7 +930,8 @@ def replace_plugin(report: LoadReport, old: LoadedPlugin,
 
 async def load_all(plugins_dir: str | Path, registry: SkillRegistry,
                    bus: "EventBus | None" = None,
-                   notify_handler: Callable[[str, str], None] | None = None
+                   notify_handler: Callable[[str, str], None] | None = None,
+                   scheduler: Any = None,
                    ) -> LoadReport:
     """Загрузить все плагины из папки.
 
@@ -940,7 +949,8 @@ async def load_all(plugins_dir: str | Path, registry: SkillRegistry,
         try:
             report.loaded.append(
                 await load_plugin(folder, registry, taken, bus=bus,
-                                  notify_handler=notify_handler))
+                                  notify_handler=notify_handler,
+                                  scheduler=scheduler))
         except ManifestError as exc:
             report.failed.append((folder.name, str(exc)))
             log.error("Плагин %s не загружен: %s", folder.name, exc)

@@ -22,7 +22,7 @@ from .audio.player import AudioPlayer
 from .conversation.listening import ListeningPipeline
 from .conversation.pipeline import ConversationPipeline, Responder
 from .core.bus import EventBus, EventType
-from .core.config import SinapsConfig, get_config
+from .core.config import DATA_DIR, SinapsConfig, get_config
 from .core.metrics import Metrics
 from .core.offline import report as network_report
 from .core.session import SessionController
@@ -76,6 +76,10 @@ class Runtime:
 
     #: Задача, ждущая микрофон, если его не было при старте.
     _mic_watcher: asyncio.Task | None = None
+
+    #: Расписание ядра: сроки, переживающие перезапуск. `None` — если
+    #: сборка шла без планировщика, тогда напоминания не ставятся.
+    scheduler: Any = None
 
     #: Куда плагины шлют просьбу показать уведомление (право `notify`).
     #: Приходит из приложения при сборке и хранится здесь, чтобы
@@ -134,6 +138,12 @@ class Runtime:
             self._start_mic_watcher()
 
         self._start_plugin_reaper()
+
+        # Расписание поднимается последним: к этому моменту плагины уже
+        # загружены и зарегистрировали свои обработчики звонков, и
+        # просроченные сроки могут сработать сразу же.
+        if self.scheduler is not None:
+            self.scheduler.start(asyncio.get_running_loop())
 
     def _start_plugin_reaper(self) -> None:
         """Поднять фоновое закрытие простоящих плагинов.
@@ -205,6 +215,8 @@ class Runtime:
             except asyncio.CancelledError:
                 pass
             self._mic_watcher = None
+        if self.scheduler is not None:
+            await self.scheduler.stop()
         if self.listener is not None:
             await self.listener.stop()
         if self.trigger is not None:
@@ -703,6 +715,21 @@ def build_assistant(cfg: SinapsConfig | None = None, *,
                                 notify_handler=notify_handler)
 
 
+def build_scheduler(data_dir=None):
+    """Создать планировщик сроков.
+
+    Отдельная функция, а не строка внутри сборки: её можно проверить
+    без моделей, а сборку — нет. Отдельный файл, а не таблица в базе
+    истории: очистка истории не должна стирать напоминания.
+    """
+    from pathlib import Path
+
+    from .core.scheduler import PlanStore, Scheduler
+
+    folder = Path(data_dir) if data_dir else DATA_DIR
+    return Scheduler(PlanStore(folder / "plans.db"))
+
+
 async def build_skills_runtime(
     cfg: SinapsConfig | None = None,
     *,
@@ -711,6 +738,7 @@ async def build_skills_runtime(
     require_activation: bool | None = None,
     user_name: str = "Капитан",
     notify_handler: Callable[[str, str], None] | None = None,
+    scheduler: Any = None,
 ) -> Runtime:
     """Собирает ассистента с пониманием команд (этап 2+).
 
@@ -742,8 +770,12 @@ async def build_skills_runtime(
     # --- загрузка плагинов ---
     # Файл runtime.py лежит в sinaps/, корень проекта — parents[1]
     plugins_dir = Path(__file__).resolve().parents[1] / "plugins"
+    if scheduler is None:
+        scheduler = build_scheduler()
+
     load_report: LoadReport = await load_all(
-        plugins_dir, registry, bus=bus, notify_handler=notify_handler)
+        plugins_dir, registry, bus=bus, notify_handler=notify_handler,
+        scheduler=scheduler)
     log.info("Плагины: %s", load_report.summary())
     for folder, reason in load_report.failed:
         log.warning("Плагин %s не загружен: %s", folder, reason)
@@ -804,7 +836,7 @@ async def build_skills_runtime(
         capture=capture, player=player, stt=stt, tts=tts,
         listener=listener, conversation=conversation,
         registry=registry, platform=platform, trigger=trigger,
-        notify_handler=notify_handler,
+        notify_handler=notify_handler, scheduler=scheduler,
         plugins=load_report, _plugin_guard=guard,
     )
 
