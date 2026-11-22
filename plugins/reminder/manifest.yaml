@@ -1,6 +1,6 @@
 name: reminder
 version: 1.0.0
-description: Напоминания: «завтра в девять позвонить маме»
+description: "Напоминания: «завтра в девять позвонить маме»"
 entry: plugin:register
 permissions:
   - notify

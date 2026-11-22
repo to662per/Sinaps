@@ -121,3 +121,104 @@ def test_notify_is_a_known_capability():
 
     assert CAP_NOTIFY == "notify"
     assert CAP_NOTIFY in KNOWN_PERMISSIONS
+
+
+def test_state_action_get_set_delete(plugin, monkeypatch):
+    """Плагин может читать, записывать и удалять состояние."""
+    from sinaps.plugins.runner import _handle_cap, _plugin_state
+    from sinaps.plugins.protocol import CAP_STATE, OP_CAP_OK
+    from sinaps.plugins.state import PluginState
+
+    # Подменяем глобальное состояние плагина на временное
+    state = PluginState(plugin="test_state_action")
+    monkeypatch.setattr("sinaps.plugins.runner._plugin_state", state)
+
+    # get
+    state.set("key1", "value1")
+    state.set("key2", 42)
+    reply = _handle_cap({"op": "cap", "cap": CAP_STATE,
+                         "action": "get", "kwargs": {"key": "key1"}},
+                        plugin.granted)
+    assert reply == {"op": OP_CAP_OK, "value": "value1"}
+
+    # get отсутствующего ключа
+    reply = _handle_cap({"op": "cap", "cap": CAP_STATE,
+                         "action": "get", "kwargs": {"key": "nope",
+                                                     "default": None}},
+                        plugin.granted)
+    assert reply == {"op": OP_CAP_OK, "value": None}
+
+    # set
+    reply = _handle_cap({"op": "cap", "cap": CAP_STATE,
+                         "action": "set", "kwargs": {"key": "key3",
+                                                     "value": [1, 2]}},
+                        plugin.granted)
+    assert reply == {"op": OP_CAP_OK, "value": None}
+    assert state.get("key3") == [1, 2]
+
+    # delete
+    reply = _handle_cap({"op": "cap", "cap": CAP_STATE,
+                         "action": "delete", "kwargs": {"key": "key1"}},
+                        plugin.granted)
+    assert reply == {"op": OP_CAP_OK, "value": True}
+    assert state.get("key1") is None
+
+    # delete отсутствующего ключа
+    reply = _handle_cap({"op": "cap", "cap": CAP_STATE,
+                         "action": "delete", "kwargs": {"key": "nope"}},
+                        plugin.granted)
+    assert reply == {"op": OP_CAP_OK, "value": False}
+
+    # keys
+    reply = _handle_cap({"op": "cap", "cap": CAP_STATE,
+                         "action": "keys", "kwargs": {}},
+                        plugin.granted)
+    assert reply["op"] == OP_CAP_OK
+    assert set(reply["value"]) == {"key2", "key3"}
+
+    # all
+    reply = _handle_cap({"op": "cap", "cap": CAP_STATE,
+                         "action": "all", "kwargs": {}},
+                        plugin.granted)
+    assert reply["value"] == {"key2": 42, "key3": [1, 2]}
+
+    # clear
+    reply = _handle_cap({"op": "cap", "cap": CAP_STATE,
+                         "action": "clear", "kwargs": {}},
+                        plugin.granted)
+    assert reply == {"op": OP_CAP_OK, "value": 2}
+    assert state.all() == {}
+
+
+def test_state_action_unknown_capability(plugin):
+    """Неизвестная возможность — отказ, а не молчание."""
+    from sinaps.plugins.runner import _handle_cap
+    from sinaps.plugins.protocol import OP_CAP_FAIL
+
+    reply = _handle_cap({"op": "cap", "cap": "network.http",
+                         "action": "get", "kwargs": {}},
+                        plugin.granted)
+    assert reply["op"] == OP_CAP_FAIL
+
+
+def test_state_action_without_permission(plugin):
+    """Без права `state` — отказ, а не тишина."""
+    from sinaps.plugins.runner import _handle_cap
+    from sinaps.plugins.protocol import CAP_STATE, OP_CAP_FAIL
+
+    plugin.granted = ("notify",)
+    reply = _handle_cap({"op": "cap", "cap": CAP_STATE,
+                         "action": "get", "kwargs": {"key": "k"}},
+                        plugin.granted)
+    assert reply["op"] == OP_CAP_FAIL
+
+
+def test_state_action_unknown_action(plugin):
+    """Неизвестное действие — отказ."""
+    from sinaps.plugins.runner import _handle_cap
+    from sinaps.plugins.protocol import CAP_STATE, OP_CAP_FAIL
+
+    reply = _handle_cap({"op": "cap", "cap": CAP_STATE,
+                         "action": "fly", "kwargs": {}},
+                        plugin.granted)
+    assert reply["op"] == OP_CAP_FAIL

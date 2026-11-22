@@ -41,6 +41,8 @@ import traceback
 from pathlib import Path
 from typing import Any
 
+from .state import PluginState, default_path
+
 #: Корень проекта. Нужен, чтобы плагин мог сказать
 #: `from sinaps.plugins.api import Skill`.
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -52,6 +54,13 @@ log = logging.getLogger("sinaps.plugins.runner")
 #: приходит без контекста: у него нет ни запроса, ни слотов, а заговорить
 #: он должен. Без этого таймер сработал бы молча.
 _CONTEXT: "_PluginContext | None" = None
+
+#: Состояние плагина: ключ-значение в SQLite, ядро хранит, плагин читает.
+#: Инициализируется при запуске дочернего процесса с именем плагина из
+#: сообщения `hello`. Плагин не имеет прямого доступа к базе — все
+#: операции проходят через OP_CAP запросы, которые обрабатывает
+#: `_handle_cap` в рабочем цикле.
+_plugin_state: PluginState | None = None
 
 CTX_FIELDS = ("text", "source", "confidence", "history", "user_name",
               "pending_intent")
@@ -376,8 +385,8 @@ def _reply_error(request_id: int, exc: BaseException) -> None:
 
 
 def main() -> int:
-    from .protocol import (OP_CALL, OP_FAILED, OP_FIRE, OP_HELLO, OP_READY,
-                           OP_STOP)
+    from .protocol import (OP_CALL, OP_CAP, OP_FAILED, OP_FIRE, OP_HELLO,
+                           OP_READY, OP_STOP)
     from .protocol import OP_RESULT, ProtocolError, read_message
     # Импорт `ManifestError` один и в начале: если импортировать его
     # внутри ветки, имя становится локальным для всей функции, и в другой
@@ -404,6 +413,7 @@ def main() -> int:
 
     folder = Path(hello["folder"])
     granted = set(hello.get("permissions") or ())
+    _plugin_state = PluginState(plugin=folder.name)
 
     # 1. Витрина и цикл событий — до запрета, иначе запрет убьёт asyncio
     from ..core.offline import enforce_offline
@@ -500,6 +510,10 @@ def main() -> int:
             _handle_fire(message, _ENTRY_MODULE[-1] if _ENTRY_MODULE else None)
             continue
 
+        if op == OP_CAP:
+            _write(_handle_cap(message, granted))
+            continue
+
         if op != OP_CALL:
             _write({"op": OP_FAILED, "phase": "run",
                     "type": "ProtocolError",
@@ -552,6 +566,73 @@ def _as_dict(response) -> dict[str, Any]:
             meta = {}
         data["meta"] = meta
     return data
+
+
+def _handle_cap(message: dict, granted: set[str]) -> dict[str, Any]:
+    """Ответить на запрос возможности плагина (OP_CAP).
+
+    Плагин спрашивает через stdout: `{"op": OP_CAP, "cap": CAP_STATE,
+    "action": ..., "kwargs": ...}`. Возвращает ответ в виде словаря:
+    `{"op": OP_CAP_OK, "value": ...}` или `{"op": OP_CAP_FAIL, ...}`.
+    Вызывающий `_worker_loop` передаёт результат в `_write`.
+    """
+    from .protocol import (CAP_STATE, OP_CAP_FAIL, OP_CAP_OK,
+                           ProtocolError)
+
+    cap = message.get("cap")
+    action = message.get("action")
+    kwargs = message.get("kwargs") or {}
+
+    if cap != CAP_STATE:
+        return {
+            "op": OP_CAP_FAIL,
+            "type": "PermissionDenied",
+            "message": f"неизвестная возможность {cap!r}",
+        }
+
+    if CAP_STATE not in granted:
+        return {
+            "op": OP_CAP_FAIL,
+            "type": "PermissionDenied",
+            "message": f"право {cap!r} не одобрено",
+        }
+
+    if _plugin_state is None:
+        return {
+            "op": OP_CAP_FAIL,
+            "type": "PluginError",
+            "message": "состояние плагина не инициализировано",
+        }
+
+    try:
+        if action == "get":
+            value = _plugin_state.get(kwargs.get("key"), kwargs.get("default"))
+            return {"op": OP_CAP_OK, "value": value}
+        elif action == "set":
+            _plugin_state.set(kwargs.get("key"), kwargs.get("value"))
+            return {"op": OP_CAP_OK, "value": None}
+        elif action == "delete":
+            removed = _plugin_state.delete(kwargs.get("key"))
+            return {"op": OP_CAP_OK, "value": removed}
+        elif action == "keys":
+            return {"op": OP_CAP_OK, "value": _plugin_state.keys()}
+        elif action == "all":
+            return {"op": OP_CAP_OK, "value": _plugin_state.all()}
+        elif action == "clear":
+            count = _plugin_state.clear()
+            return {"op": OP_CAP_OK, "value": count}
+        else:
+            return {
+                "op": OP_CAP_FAIL,
+                "type": "ProtocolError",
+                "message": f"неизвестное действие {action!r}",
+            }
+    except ProtocolError as exc:
+        return {
+            "op": OP_CAP_FAIL,
+            "type": "PluginError",
+            "message": str(exc),
+        }
 
 
 def _handle_fire(message, module) -> None:
